@@ -67,34 +67,75 @@ public sealed class DrawingTools(SwSession session)
         Output.Json(_svc.ProjectedAsync(parent, direction, doc, cancellationToken), progress, "drw_view_projected");
 
     [McpServerTool(Name = "drw_view_section", Title = "Section view", ReadOnly = false, Destructive = false, Idempotent = false, OpenWorld = false)]
-    [Description("Section view (A-A) along a straight cut line across the parent view, in sheet mm; the line must cross the whole part " +
-                 "(see modelBoxMm in drw_info). Verified: a section view looking along the cutting-plane normal, showing the cut extents; " +
-                 "otherwise removed.")]
+    [Description("Section view (A-A) along a straight cut line across the parent view: in sheet mm (crossing the whole part, see " +
+                 "modelBoxMm in drw_info), or through a model point (throughModelMm, vertical or horizontal on the sheet). Options: " +
+                 "components left uncut (also inside subassemblies), auto hatching, flip the viewing direction. Verified: a section view " +
+                 "looking along the cutting-plane normal, otherwise removed; no sketch is left open.")]
     public Task<string> DrwViewSection(
         IProgress<ProgressNotificationValue> progress,
         [Description(ParentDesc)] string parent,
-        [Description("Cut line start [x,y] sheet mm, outside the part.")] double[] lineStartMm,
-        [Description("Cut line end [x,y] sheet mm, outside the part.")] double[] lineEndMm,
+        [Description("Cut line start [x,y] sheet mm, outside the part.")] double[]? lineStartMm = null,
+        [Description("Cut line end [x,y] sheet mm, outside the part.")] double[]? lineEndMm = null,
+        [Description("Instead of the line: a model point [x,y,z] mm the cut goes through.")] double[]? throughModelMm = null,
+        [Description("With throughModelMm: vertical (default) | horizontal cut line on the sheet.")] string? orientation = null,
+        [Description("Assembly components not cut, e.g. [\"bolt-1\", \"sub-1/pin-1\"].")] string[]? excludeComponents = null,
+        [Description("true: SOLIDWORKS varies the hatch per component.")] bool? autoHatch = null,
+        [Description("Look the other way along the cut.")] bool flip = false,
         [Description(LabelDesc)] string? label = null,
         [Description(AtDesc)] double[]? atMm = null,
         [Description(DocDesc)] string? doc = null,
         CancellationToken cancellationToken = default) =>
-        Output.Json(_svc.SectionAsync(parent, lineStartMm, lineEndMm, label, atMm, doc, cancellationToken), progress, "drw_view_section");
+        Output.Json(_svc.SectionAsync(new DrwSectionRequest
+        {
+            Doc = doc, Parent = parent, LineStartMm = lineStartMm, LineEndMm = lineEndMm, ThroughModelMm = throughModelMm, Orientation = orientation,
+            ExcludeComponents = excludeComponents, AutoHatch = autoHatch, Flip = flip, Label = label, AtMm = atMm,
+        }, cancellationToken), progress, "drw_view_section");
 
     [McpServerTool(Name = "drw_view_detail", Title = "Detail view", ReadOnly = false, Destructive = false, Idempotent = false, OpenWorld = false)]
-    [Description("Detail view: an enlarged circular region of the parent view (center and radius in sheet mm). Verified: a detail view at " +
-                 "the scale, otherwise removed; warns when it shows no edges (detail views looked empty in earlier tests: check a PDF).")]
+    [Description("Detail view: an enlarged circular region of the parent view, the circle in sheet mm or in the model (centerModelMm, " +
+                 "radiusModelMm). Verified: a detail view at the scale, otherwise removed; warns when it shows no edges; no sketch is " +
+                 "left open.")]
     public Task<string> DrwViewDetail(
         IProgress<ProgressNotificationValue> progress,
         [Description(ParentDesc)] string parent,
-        [Description("Circle center [x,y] sheet mm, on the part.")] double[] centerMm,
-        [Description("Circle radius in sheet mm.")] double radiusMm,
+        [Description("Circle center [x,y] sheet mm, on the part.")] double[]? centerMm = null,
+        [Description("Circle radius in sheet mm.")] double? radiusMm = null,
+        [Description("Instead: circle center [x,y,z] in model mm.")] double[]? centerModelMm = null,
+        [Description("Instead: circle radius in model mm.")] double? radiusModelMm = null,
         [Description("Detail scale, e.g. \"2:1\"; default: twice the parent's.")] string? scale = null,
         [Description(LabelDesc)] string? label = null,
         [Description(AtDesc)] double[]? atMm = null,
+        [Description("Where the circle's label goes [x,y] sheet mm.")] double[]? labelAtMm = null,
         [Description(DocDesc)] string? doc = null,
         CancellationToken cancellationToken = default) =>
-        Output.Json(_svc.DetailAsync(parent, centerMm, radiusMm, scale, label, atMm, doc, cancellationToken), progress, "drw_view_detail");
+        Output.Json(_svc.DetailAsync(new DrwDetailRequest
+        {
+            Doc = doc, Parent = parent, CenterMm = centerMm, RadiusMm = radiusMm, CenterModelMm = centerModelMm, RadiusModelMm = radiusModelMm,
+            Scale = scale, Label = label, AtMm = atMm, LabelAtMm = labelAtMm,
+        }, cancellationToken), progress, "drw_view_detail");
+
+    [McpServerTool(Name = "drw_view_set", Title = "Move or rescale view", ReadOnly = false, Destructive = false, Idempotent = true, OpenWorld = false)]
+    [Description("Change an existing view: move it (its outline centre to centerMm, or its outline's corner to boundsMm, corrected " +
+                 "from the outline read back, as IView.Position differs by view type), its scale, the model configuration it shows, " +
+                 "its alignment (none breaks it) and position lock. dryRun reports the planned outline and overlaps without changing it.")]
+    public Task<string> DrwViewSet(
+        IProgress<ProgressNotificationValue> progress,
+        [Description("View name (drw_info lists views).")] string view,
+        [Description("Target outline centre [x,y] sheet mm.")] double[]? centerMm = null,
+        [Description("Target outline [xMin,yMin,xMax,yMax] sheet mm (its lower-left corner is matched).")] double[]? boundsMm = null,
+        [Description("View scale, e.g. \"1:2\", or \"sheet\" to follow the sheet.")] string? scale = null,
+        [Description("Model configuration to show.")] string? configuration = null,
+        [Description("none (break it) | default (with its parent) | horizontal | vertical (with alignWith).")] string? alignment = null,
+        [Description("View to align with (alignment horizontal/vertical).")] string? alignWith = null,
+        [Description("Lock (true) or unlock the view's position.")] bool? locked = null,
+        [Description("Report the plan only.")] bool dryRun = false,
+        [Description(DocDesc)] string? doc = null,
+        CancellationToken cancellationToken = default) =>
+        Output.Json(_svc.ViewSetAsync(new DrwViewSetRequest
+        {
+            Doc = doc, View = view, CenterMm = centerMm, BoundsMm = boundsMm, Scale = scale, Configuration = configuration, Alignment = alignment,
+            AlignWith = alignWith, Locked = locked, DryRun = dryRun,
+        }, cancellationToken), progress, "drw_view_set");
 
     [McpServerTool(Name = "drw_dimensions_auto", Title = "Insert model dimensions", ReadOnly = false, Destructive = false, Idempotent = false, OpenWorld = false)]
     [Description("Model items / auto dimensions: inserts the model's sketch and feature dimensions (marked for drawing) into the views. " +
@@ -108,34 +149,50 @@ public sealed class DrawingTools(SwSession session)
 
     [McpServerTool(Name = "drw_dimension_add", Title = "Drawing dimension", ReadOnly = false, Destructive = false, Idempotent = false, OpenWorld = false)]
     [Description("Dimension edges or vertices of the view's model in a drawing view (a reference dimension): linear, horizontal, vertical, " +
-                 "radial, diameter or angular. References are in model mm, e.g. a:{type:'edge',at:[0,30,20]}. Verified: the value SOLIDWORKS " +
-                 "reads equals the geometry, otherwise removed.")]
+                 "radial, diameter, angular, chamfer (a: the chamfer edge, b: the lead-in edge), or a baseline / chain set (a: the datum, " +
+                 "targets, direction, side: stacked without overlap). References are in model mm, e.g. " +
+                 "a:{type:'edge',at:[0,30,20]}. Verified: the value SOLIDWORKS reads equals the geometry (chamfer: the dimension type), " +
+                 "otherwise removed; the default text spot is kept inside the drawing frame. Edit it afterwards with drw_dimension_set.")]
     public async Task<string> DrwDimensionAdd(
         [Description("View name (drw_info lists views).")] string view,
         [Description("Edge or vertex of the view's model.")] EntityRef a,
-        [Description("Second edge or vertex (distance or angle).")] EntityRef? b = null,
-        [Description("linear | horizontal | vertical | radial | diameter | angular")] string kind = "linear",
+        [Description("Second edge or vertex (distance or angle; chamfer: the lead-in edge).")] EntityRef? b = null,
+        [Description("linear | horizontal | vertical | radial | diameter | angular | chamfer | baseline | chain")] string kind = "linear",
         [Description("Dimension text [x,y] sheet mm; default: beside the view.")] double[]? textAtMm = null,
+        [Description("kind baseline | chain: the edges/vertices to dimension, from datum 'a' (baseline) or each from the previous (chain).")] EntityRef[]? targets = null,
+        [Description("baseline/chain: horizontal | vertical distances.")] string? direction = null,
+        [Description("baseline/chain: above | below (horizontal), left | right (vertical).")] string? side = null,
+        [Description("baseline/chain: row spacing in mm.")] double spacingMm = 7,
         [Description(DocDesc)] string? doc = null,
         CancellationToken cancellationToken = default) =>
-        ResultJson.Serialize(await _svc.DimensionAddAsync(view, a, b, kind, textAtMm, doc, cancellationToken));
+        DrawingLayoutNorm(kind) is "baseline" or "chain"
+            ? b is not null || textAtMm is not null
+                ? throw SwException.InvalidArgument("A baseline or chain set takes the datum as 'a' and the rest as 'targets' (no 'b' or 'textAtMm').")
+                : ResultJson.Serialize(await _svc.DimensionSetAddAsync(view, a, targets, kind, direction, side, spacingMm, doc, cancellationToken))
+            : targets is not null || direction is not null || side is not null
+                ? throw SwException.InvalidArgument("targets, direction and side go with kind baseline or chain.")
+                : ResultJson.Serialize(await _svc.DimensionAddAsync(view, a, b, kind, textAtMm, doc, cancellationToken));
+
+    private static string? DrawingLayoutNorm(string? s) => string.IsNullOrWhiteSpace(s) ? null : s.Trim().ToLowerInvariant();
 
     [McpServerTool(Name = "drw_note_add", Title = "Drawing note", ReadOnly = false, Destructive = false, Idempotent = false, OpenWorld = false)]
-    [Description("Note / text on the sheet, or in a view (it then moves with the view), at [x,y] sheet mm; \\n starts a new line. " +
-                 "Verified: text and position read back.")]
+    [Description("Note / text on the sheet, or in a view (it then moves with the view), at [x,y] sheet mm; a line break (or the escape \\n) " +
+                 "starts a new line. attachTo gives it a leader to an edge or vertex of the view's model (model mm). Verified: text, " +
+                 "position and the leader's attachment read back.")]
     public async Task<string> DrwNoteAdd(
         [Description("Note text.")] string text,
         [Description("Position [x,y] sheet mm, from the lower-left corner.")] double[] atMm,
         [Description("Text height in mm.")] double? heightMm = null,
         [Description("View to attach the note to; default: the sheet.")] string? view = null,
+        [Description("Leader note: the edge or vertex of the view's model it points to (model mm), e.g. {type:'edge',at:[0,20,10]}; needs view.")] EntityRef? attachTo = null,
         [Description(DocDesc)] string? doc = null,
         CancellationToken cancellationToken = default) =>
-        ResultJson.Serialize(await _svc.NoteAddAsync(text, atMm, heightMm, view, doc, cancellationToken));
+        ResultJson.Serialize(await _svc.NoteAddAsync(text, atMm, heightMm, view, attachTo, doc, cancellationToken));
 
     [McpServerTool(Name = "drw_annotation_add", Title = "Drawing annotation", ReadOnly = false, Destructive = false, Idempotent = false, OpenWorld = false)]
     [Description("GD&T and symbols in a view, on an edge of the view's model (model mm): datum feature (label), surface finish " +
                  "(roughness Ra), geometric tolerance frame (characteristic, tolerance, Ø, MMC/LMC, datums) or a BOM balloon (without " +
-                 "'at': balloons for every component). Verified: label, roughness, frame or balloon text and the attachment read back; otherwise removed.")]
+                 "'at': balloons for every component, or for the components listed, laid out on one side). Verified: label, roughness, frame or balloon text and the attachment read back; otherwise removed.")]
     public async Task<string> DrwAnnotationAdd(
         [Description("datum | surface_finish | gtol | balloon")] string kind,
         [Description("View name (drw_info lists views).")] string view,
@@ -149,12 +206,15 @@ public sealed class DrawingTools(SwSession session)
         [Description("gtol: a diameter (Ø) tolerance zone.")] bool diameter = false,
         [Description("gtol: none (default) | mmc | lmc")] string? material = null,
         [Description("gtol: datum letters, e.g. [\"A\",\"B\"].")] string[]? datums = null,
+        [Description("balloon without at: only these components, e.g. [\"bolt-1\"].")] string[]? components = null,
+        [Description("balloon without at: square | circle | top | bottom | left | right.")] string? layout = null,
         [Description(DocDesc)] string? doc = null,
         CancellationToken cancellationToken = default) =>
         ResultJson.Serialize(await _svc.AnnotationAddAsync(new DrwAnnotationRequest
         {
             Doc = doc, Kind = kind, View = view, At = at, AtMm = atMm, Label = label, Roughness = roughness, Finish = finish,
             Characteristic = characteristic, Tolerance = tolerance, Diameter = diameter, Material = material, Datums = datums,
+            Components = components, Layout = layout,
         }, cancellationToken));
 
     [McpServerTool(Name = "drw_table_add", Title = "Hole or revision table", ReadOnly = false, Destructive = false, Idempotent = false, OpenWorld = false)]
@@ -189,14 +249,19 @@ public sealed class DrawingTools(SwSession session)
         Output.Json(_svc.BomAddAsync(view, atMm, template, doc, cancellationToken), progress, "drw_bom_add");
 
     [McpServerTool(Name = "drw_center_marks", Title = "Center marks", ReadOnly = false, Destructive = false, Idempotent = false, OpenWorld = false)]
-    [Description("Center marks on the holes seen face-on in drawing views. Returns the center marks added per view, counted before and " +
+    [Description("Center marks on the holes seen face-on in drawing views, or center marks / centerlines on chosen edges and faces (at). Returns the center marks added per view, counted before and " +
                  "after; none comes with a hint why.")]
     public Task<string> DrwCenterMarks(
         IProgress<ProgressNotificationValue> progress,
-        [Description("View names; default: the views of the current sheet.")] string[]? views = null,
+        [Description("View names; default: the views of the current sheet (with at: one view).")] string[]? views = null,
+        [Description("Only on these entities of the view's model (model mm): circular edges (center_mark) or round faces (centerline).")] EntityRef[]? at = null,
+        [Description("With at: center_mark | centerline (e.g. a port's axis in a section view).")] string? kind = null,
         [Description(DocDesc)] string? doc = null,
         CancellationToken cancellationToken = default) =>
-        Output.Json(_svc.CenterMarksAsync(views, doc, cancellationToken), progress, "drw_center_marks");
+        at is { Length: > 0 }
+            ? Output.Json(_svc.CenterMarksAtAsync(views is { Length: 1 } ? views[0] : throw SwException.InvalidArgument("'at' needs exactly one view in 'views'."), at, kind, doc, cancellationToken), progress, "drw_center_marks")
+            : kind is not null ? throw SwException.InvalidArgument("'kind' goes with 'at'.")
+            : Output.Json(_svc.CenterMarksAsync(views, doc, cancellationToken), progress, "drw_center_marks");
 
     [McpServerTool(Name = "drw_info", Title = "Drawing info", ReadOnly = true, Destructive = false, Idempotent = true, OpenWorld = false)]
     [Description("Drawing overview: sheets (size, scale, projection, format) and their views (name, type, orientation, scale, centerMm, " +

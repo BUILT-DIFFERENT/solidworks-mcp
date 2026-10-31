@@ -4,16 +4,17 @@
 # solidworks-mcp
 
 An MCP server that lets AI agents (Claude Code, Claude Desktop and other MCP clients) drive a running SOLIDWORKS.
-With its 127 tools, agents can sketch and model parts (extrudes, revolves, sweeps, lofts, holes, patterns, shells,
-surfaces, sheet metal, weldment frames), edit imported bodies directly (delete, offset and move faces), build assemblies with mates (also limit, symmetric, width, hinge, gear and rack mates) and component patterns, make drawings with views, dimensions, GD&T, balloons and tables, import and export
+With its 141 tools, agents can sketch and model parts (extrudes, revolves, sweeps, lofts, holes, patterns, shells,
+surfaces, sheet metal, weldment frames), edit imported bodies directly (delete, offset and move faces), build assemblies with mates (also limit, symmetric, width, hinge, gear and rack mates) and component patterns, make drawings with views, dimensions, GD&T, balloons and tables and finish existing ones (list, edit, move and delete annotations and views, title blocks, BOMs, hatches, a sheet check), import and export
 (STEP, IGES, STL, Parasolid, PDF, DXF …), run static stress studies, and inspect, measure and screenshot the result. It
 is written in C# against SolidWorks' official COM API.
 
 > **Unofficial.** This project is not affiliated with, endorsed by or supported by Dassault Systèmes. SOLIDWORKS is a
 > trademark of Dassault Systèmes SolidWorks Corporation.
 
-> **Status: 0.1.0 pre-release.** Every tool passes the offline contract tests and the live tests against a real
-> SOLIDWORKS 2025 ([live status](#live-test-status), [known issues](#known-issues)). Other SOLIDWORKS versions are
+> **Status: 0.1.0 pre-release.** Every tool passes the offline contract tests, and the 127 tools of M7 pass the live
+> tests against a real SOLIDWORKS 2025 ([live status](#live-test-status), [known issues](#known-issues)); the
+> drawing-editing tools added since have live tests that have not been run yet. Other SOLIDWORKS versions are
 > untested; please report what you find.
 
 Why another SolidWorks MCP server? It was built from the lessons of testing every tool of an earlier server, where
@@ -96,22 +97,22 @@ Integrity event 3077). When the exe is blocked, `tools\install.ps1` registers th
 again: it publishes a new binary, which gets a new verdict. Signed releases will avoid this.
 
 ## Tools
-127 tools in 15 toolsets. The full, current list with parameters is in [`docs/tools.md`](docs/tools.md), generated from
+141 tools in 15 toolsets. The full, current list with parameters is in [`docs/tools.md`](docs/tools.md), generated from
 the server.
 
 | Toolset | Tools |
 |---|---|
 | session (5) | `sw_status`, `sw_connect`, `sw_help`, `dialog_list`, `dialog_respond` |
-| documents (9) | `doc_new` (part, assembly, drawing), `doc_open` (also imports STEP/IGES/Parasolid/STL), `doc_save`, `doc_close`, `doc_activate`, `doc_list`, `doc_rebuild`, `doc_undo`, `doc_units_set` |
+| documents (10) | `doc_new` (part, assembly, drawing), `doc_open` (also imports STEP/IGES/Parasolid/STL), `doc_save`, `doc_close`, `doc_activate`, `doc_list`, `doc_rebuild`, `doc_undo`, `doc_units_set`, `doc_standard` (drafting standard and named document options) |
 | inspect (10) | `model_info`, `feature_list`, `face_list`, `edge_list`, `vertex_list`, `body_list`, `model_measure`, `model_mass`, `model_check`, `view_screenshot` |
 | sketch (17) | `sketch_start`, `sketch_add` (lines, arcs, circles, rectangles, slots, polygons, ellipses, splines, points), `sketch_finish`, `sketch_edit`, `sketch_info`, dimensions, relations, trim, extend, offset, fillet, chamfer, pattern, mirror, convert, construction, delete |
-| features (22) | extrude, revolve, sweep, loft, fillet, chamfer, shell, Hole Wizard holes, draft, rib, helix, cosmetic thread, linear/circular patterns, mirror; feature info, delete, suppress, rename, rollback; dimension list/set |
+| features (23) | extrude, revolve, sweep, loft, fillet, chamfer, shell, Hole Wizard holes (and editing them in place), draft, rib, helix, cosmetic thread, linear/circular patterns, mirror; feature info, delete, suppress, rename, rollback; dimension list/set |
 | reference (4) | `ref_plane`, `ref_axis`, `ref_point`, `ref_coordsys` |
 | bodies (11) | move/copy, delete, combine, split; direct face edits (`face_edit`: delete and heal, offset, move); surfaces: extrude, revolve, planar, offset, knit, thicken |
 | sheetmetal (7) | base flange, edge flange, miter flange (around corners, closed trays), hem (closed, open, teardrop, rolled), sketched bend, flatten, flat-pattern DXF/DWG |
 | weldments (1) | `weldment_member`: structural members (tube, pipe, channel, angle, beam profiles) along 2D or 3D sketch lines, mitered or butt corners |
 | assembly (10) | insert, mates (standard, limit, symmetric, width, hinge, gear, rack and pinion), mate list, component list/set/move, interference, replace, linear/circular patterns and mirror of components (also as new opposite-hand parts), exploded views |
-| drawing (13) | sheet setup, standard/projected/section/detail views, model dimensions, dimensions, notes, BOM, center marks, datums, surface finish, tolerance frames, balloons, hole and revision tables, info |
+| drawing (25) | sheet setup, standard/projected/section/detail views, model dimensions, dimensions (also chamfer, baseline and chain), notes (also with leaders), BOM, center marks and centerlines, datums, surface finish, tolerance frames, balloons, hole and revision tables, info; **editing existing drawings**: annotation list, dimension and annotation edits, delete by name, view move/scale/configuration/alignment, title block, hatches, table and BOM edits, sheet check, coordinate lookup, dimension stacking, batches as one undo step |
 | export (1) | `model_export`: STEP (AP203/214/242), IGES, Parasolid, STL, 3MF, images, eDrawings; PDF/DWG/DXF from drawings |
 | properties (13) | materials, custom properties, equations, configurations, appearance |
 | simulation (3) | `sim_static` (fixtures, pressure/force, mesh, von Mises, displacement, safety factor), `sim_list`, `sim_delete` |
@@ -141,6 +142,12 @@ Every area has live tests that drive a real SOLIDWORKS (2025 SP1.2) and check th
 The golden scenarios in `tools/mcp_smoke.py` (drawing, plate, enclosure, edit, assembly, sheet metal) run through the
 real MCP protocol within their call budgets, each with an exact oracle (volumes, interference, inserted dimensions, a
 PDF, a flat blank and its DXF).
+
+**Not yet run live:** the drawing-editing tools added after the M7 test run (`drw_annotation_list`, `drw_dimension_set`,
+`drw_annotation_set`, `drw_delete`, `drw_view_set`, `drw_title_block`, `drw_hatch`, `drw_table_set`, `drw_check`,
+`drw_locate`, `drw_dimensions_arrange`, `drw_batch`, `doc_standard`, `feature_hole_edit`) and the new options of existing
+tools are implemented, compile against the interop and have offline unit tests and live tests (`DrawingEditLiveTests`),
+but those live tests have not been run yet. See DESIGN §7.3.
 
 ### Known issues
 - **Long sessions slow SOLIDWORKS down.** After a few hundred documents in one SOLIDWORKS session (heavy agent use or

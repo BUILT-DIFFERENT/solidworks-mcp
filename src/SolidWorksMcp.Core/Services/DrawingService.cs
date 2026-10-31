@@ -132,7 +132,10 @@ public sealed class DrwNoteResult : ToolResult
     public double? HeightMm { get; init; }
     /// <summary>The view the note belongs to (null = the sheet).</summary>
     public string? View { get; init; }
+    /// <summary>The model entity its leader points to (attachTo).</summary>
+    public string? AttachedTo { get; init; }
     public IReadOnlyList<string>? Checks { get; init; }
+    public IReadOnlyList<ResolvedInfo>? Resolved { get; init; }
 }
 
 public sealed class DrwBomResult : ToolResult
@@ -170,6 +173,42 @@ public sealed record DrwSheetRequest
     public string? Projection { get; init; }
     /// <summary>iso | ansi | none | a .slddrt file.</summary>
     public string? Format { get; init; }
+}
+
+/// <summary>drw_view_section options.</summary>
+public sealed record DrwSectionRequest
+{
+    public string? Doc { get; init; }
+    public string? Parent { get; init; }
+    public double[]? LineStartMm { get; init; }
+    public double[]? LineEndMm { get; init; }
+    /// <summary>A model point (mm) the cut goes through, instead of the sheet line.</summary>
+    public double[]? ThroughModelMm { get; init; }
+    /// <summary>vertical | horizontal: the cut line on the sheet with throughModelMm.</summary>
+    public string? Orientation { get; init; }
+    public string? Label { get; init; }
+    public double[]? AtMm { get; init; }
+    /// <summary>Assembly components not cut ("bolt-1", "sub-1/pin-1").</summary>
+    public IReadOnlyList<string>? ExcludeComponents { get; init; }
+    public bool? AutoHatch { get; init; }
+    /// <summary>Look the other way along the cut.</summary>
+    public bool Flip { get; init; }
+}
+
+/// <summary>drw_view_detail options.</summary>
+public sealed record DrwDetailRequest
+{
+    public string? Doc { get; init; }
+    public string? Parent { get; init; }
+    public double[]? CenterMm { get; init; }
+    public double? RadiusMm { get; init; }
+    public double[]? CenterModelMm { get; init; }
+    public double? RadiusModelMm { get; init; }
+    public string? Scale { get; init; }
+    public string? Label { get; init; }
+    public double[]? AtMm { get; init; }
+    /// <summary>Where the detail circle's label goes (sheet mm).</summary>
+    public double[]? LabelAtMm { get; init; }
 }
 
 // ====================================================================== service
@@ -705,15 +744,35 @@ public sealed partial class DrawingService(SwSession session)
     // ================================================================== drw_view_section
 
     public Task<DrwViewResult> SectionAsync(string? parent, double[]? lineStartMm, double[]? lineEndMm, string? label, double[]? atMm,
-        string? doc, CancellationToken ct = default)
+        string? doc, CancellationToken ct = default) =>
+        SectionAsync(new DrwSectionRequest { Parent = parent, LineStartMm = lineStartMm, LineEndMm = lineEndMm, Label = label, AtMm = atMm, Doc = doc }, ct);
+
+    /// <summary>
+    /// drw_view_section. The cut line is given in sheet mm, or through a model point (throughModelMm) across the part,
+    /// horizontal or vertical on the sheet. Options: components left uncut (also inside subassemblies), automatic
+    /// hatching, the viewing direction flipped. The parent view's sketch is left afterwards (it used to stay open).
+    /// </summary>
+    public Task<DrwViewResult> SectionAsync(DrwSectionRequest q, CancellationToken ct = default)
     {
-        var p0 = Sheet2(lineStartMm, "lineStartMm");
-        var p1 = Sheet2(lineEndMm, "lineEndMm");
-        double len = Math.Sqrt((p1.X - p0.X) * (p1.X - p0.X) + (p1.Y - p0.Y) * (p1.Y - p0.Y));
-        if (len < 1) throw SwException.InvalidArgument($"The cut line is {Math.Round(len, 3)} mm long; it must cross the whole part.");
-        (double X, double Y)? at = atMm is null ? null : Sheet2(atMm, "atMm");
-        string? lab = Label(label);
-        var options = RunOptions.Write(doc) with { Timeout = Longer(session, 120), DialogRules = [DialogRules.PartialSectionNo] };
+        bool byPoint = q.ThroughModelMm is not null;
+        if (byPoint && (q.LineStartMm is not null || q.LineEndMm is not null))
+            throw SwException.InvalidArgument("Pass the cut line (lineStartMm, lineEndMm) or throughModelMm, not both.");
+        if (!byPoint && (q.LineStartMm is null || q.LineEndMm is null))
+            throw SwException.InvalidArgument("Pass the cut line as lineStartMm and lineEndMm (sheet mm), or a model point throughModelMm with orientation.");
+        if (byPoint) Units.PointM(q.ThroughModelMm, "throughModelMm");
+        string orient = DrawingLayout.Norm(q.Orientation) switch
+        {
+            null or "vertical" => "vertical",
+            "horizontal" => "horizontal",
+            _ => throw SwException.InvalidArgument($"Unknown orientation '{q.Orientation}'.", "Use vertical or horizontal (the cut line on the sheet)."),
+        };
+        if (!byPoint && q.Orientation is not null) throw SwException.InvalidArgument("'orientation' goes with throughModelMm.");
+        var g0 = byPoint ? default : Sheet2(q.LineStartMm, "lineStartMm");
+        var g1 = byPoint ? default : Sheet2(q.LineEndMm, "lineEndMm");
+        (double X, double Y)? at = q.AtMm is null ? null : Sheet2(q.AtMm, "atMm");
+        string? lab = Label(q.Label);
+        string? parent = q.Parent;
+        var options = RunOptions.Write(q.Doc) with { Timeout = Longer(session, 120), DialogRules = [DialogRules.PartialSectionNo] };
         return session.RunAsync("drw_view_section", ctx =>
         {
             var d = ctx.Doc;
@@ -721,6 +780,18 @@ public sealed partial class DrawingService(SwSession session)
             var hit = FindView(ctx, drw, parent, "parent");
             var sheet = SheetOf(drw, hit);
             var geo = GeometryBox(ctx, hit);
+            var p0 = g0;
+            var p1 = g1;
+            if (byPoint)
+            {
+                var c = ModelToSheet(hit, q.ThroughModelMm!, "throughModelMm");
+                if (!geo.Contains(c.X, c.Y, 0.01))
+                    throw SwException.InvalidArgument($"throughModelMm maps to [{Fmt([c.X, c.Y])}] mm in '{hit.Name}', outside the part [{Fmt(geo.ToArray())}] mm.");
+                (p0, p1) = orient == "vertical" ? ((c.X, geo.Y0 - 5), (c.X, geo.Y1 + 5)) : ((geo.X0 - 5, c.Y), (geo.X1 + 5, c.Y));
+            }
+            double len = Math.Sqrt((p1.X - p0.X) * (p1.X - p0.X) + (p1.Y - p0.Y) * (p1.Y - p0.Y));
+            if (len < 1) throw SwException.InvalidArgument($"The cut line is {Math.Round(len, 3)} mm long; it must cross the whole part.");
+            var excluded = q.ExcludeComponents is { Count: > 0 } ex0 ? ViewComponents(hit, ex0) : [];
             if (geo.Contains(p0.X, p0.Y) || geo.Contains(p1.X, p1.Y) || !Crosses(p0, p1, geo))
                 throw SwException.InvalidArgument(
                     $"The cut line [{Fmt([p0.X, p0.Y])}] → [{Fmt([p1.X, p1.Y])}] mm must cross the whole part: in '{hit.Name}' the part spans [{Fmt(geo.ToArray())}] mm.",
@@ -760,7 +831,9 @@ public sealed partial class DrawingService(SwSession session)
                 d.ClearSelection2(true);
                 if (!seg.Select4(false, null))
                     throw new SwException(ErrorCodes.FeatureFailed, "Could not select the cut line.");
-                sv = drw.CreateSectionViewAt5(Units.M(x), Units.M(y), 0, lb, 0, ComArgs.Empty, 0);
+                int opts = q.Flip ? (int)swCreateSectionViewAtOptions_e.swCreateSectionView_ChangeDirection : 0;
+                object? exclude = excluded.Count > 0 ? ComArgs.DispatchArray(excluded) : ComArgs.Empty;
+                sv = drw.CreateSectionViewAt5(Units.M(x), Units.M(y), 0, lb, opts, exclude, 0);
             }
             catch (Exception ex) when (seg is not null && !ComArgs.IsDisconnect(ex))
             {
@@ -814,6 +887,25 @@ public sealed partial class DrawingService(SwSession session)
                 // Informational: GetFaceHatchCount / GetSolidHatchCount read 0 for a hatched section of a solid block live, so a
                 // zero proves nothing; the view's direction (above) and extents (modelBoxMm) are the checks.
                 if (hatches > 0) checks.Add($"{hatches} hatched cut face(s)");
+                if ((object?)sv.GetSection() is IDrSection sec)
+                {
+                    if (q.AutoHatch is bool ah)
+                    {
+                        sec.SetAutoHatch(ah);
+                        if (sec.GetAutoHatch() != ah) ctx.Warn($"Auto hatching reads {sec.GetAutoHatch()}, not {ah}.");
+                        else checks.Add($"auto hatching {(ah ? "on" : "off")}");
+                    }
+                    if (excluded.Count > 0)
+                    {
+                        int got = ComArgs.Objects<object>((object?)sec.GetExcludedComponents()).Count;
+                        if (got >= excluded.Count) checks.Add($"{got} component(s) excluded from the cut");
+                        else ctx.Warn($"The section excludes {got} component(s), not the {excluded.Count} asked for.");
+                    }
+                    if (q.Flip) checks.Add($"direction flipped (reversed: {sec.GetReversedCutDirection()})");
+                }
+                else if (q.AutoHatch is not null || excluded.Count > 0)
+                    ctx.Warn("The section line could not be read back to check its options.");
+                LeaveViewSketch(ctx, d, drw, sheet, checks);
                 OverlapCheck(ctx, sheet, [sv], checks);
                 return new DrwViewResult { Doc = ctx.Title(d), View = info with { Parent = hit.Name }, Label = lb, Checks = checks };
             }
@@ -849,11 +941,27 @@ public sealed partial class DrawingService(SwSession session)
     // ================================================================== drw_view_detail
 
     public Task<DrwViewResult> DetailAsync(string? parent, double[]? centerMm, double radiusMm, string? scale, string? label, double[]? atMm,
-        string? doc, CancellationToken ct = default)
+        string? doc, CancellationToken ct = default) =>
+        DetailAsync(new DrwDetailRequest { Parent = parent, CenterMm = centerMm, RadiusMm = radiusMm, Scale = scale, Label = label, AtMm = atMm, Doc = doc }, ct);
+
+    /// <summary>
+    /// drw_view_detail. The circle is given in sheet mm, or in the parent's model (centerModelMm, radiusModelMm: converted
+    /// through the view's transform and scale); the circle's label can be placed. The parent view's sketch is left afterwards.
+    /// </summary>
+    public Task<DrwViewResult> DetailAsync(DrwDetailRequest q, CancellationToken ct = default)
     {
-        var c = Sheet2(centerMm, "centerMm");
-        if (!double.IsFinite(radiusMm) || radiusMm < 0.5 || radiusMm > 2000)
-            throw SwException.InvalidArgument($"radiusMm must be between 0.5 and 2000 (got {radiusMm}).");
+        if (q.CenterMm is not null && q.CenterModelMm is not null) throw SwException.InvalidArgument("Pass centerMm or centerModelMm, not both.");
+        if (q.CenterMm is null && q.CenterModelMm is null) throw SwException.InvalidArgument("Pass the circle's centre: centerMm (sheet) or centerModelMm (model).");
+        if (q.RadiusMm is not null && q.RadiusModelMm is not null) throw SwException.InvalidArgument("Pass radiusMm or radiusModelMm, not both.");
+        if (q.RadiusMm is null && q.RadiusModelMm is null) throw SwException.InvalidArgument("Pass the circle's radius: radiusMm (sheet) or radiusModelMm (model).");
+        if (q.CenterModelMm is not null) Units.PointM(q.CenterModelMm, "centerModelMm");
+        var c0 = q.CenterMm is null ? default : Sheet2(q.CenterMm, "centerMm");
+        double r0 = q.RadiusMm ?? q.RadiusModelMm!.Value;
+        if (!double.IsFinite(r0) || r0 < 0.05 || r0 > 2000)
+            throw SwException.InvalidArgument($"The detail radius must be between 0.05 and 2000 mm (got {r0}).");
+        (double X, double Y)? labelAt = q.LabelAtMm is null ? null : Sheet2(q.LabelAtMm, "labelAtMm");
+        string? parent = q.Parent, scale = q.Scale, label = q.Label, doc = q.Doc;
+        double[]? atMm = q.AtMm;
         (double Num, double Den)? fixedScale = string.IsNullOrWhiteSpace(scale) ? null : DrawingLayout.ParseScale(scale, "scale");
         (double X, double Y)? at = atMm is null ? null : Sheet2(atMm, "atMm");
         string? lab = Label(label);
@@ -864,6 +972,9 @@ public sealed partial class DrawingService(SwSession session)
             var hit = FindView(ctx, drw, parent, "parent");
             var sheet = SheetOf(drw, hit);
             double ps = hit.View.ScaleDecimal;
+            var c = q.CenterModelMm is null ? c0 : ModelToSheet(hit, q.CenterModelMm, "centerModelMm");
+            double radiusMm = q.RadiusModelMm is double rm ? rm * ps : r0;
+            if (radiusMm < 0.5) throw SwException.InvalidArgument($"The detail circle is {Math.Round(radiusMm, 3)} mm on the sheet (radiusModelMm × the view scale {DrawingLayout.FormatScale(ps)}); at least 0.5 mm.");
             var (num, den) = fixedScale ?? DrawingLayout.Ratio(2 * ps);
             double s = num / den;
             var geo = GeometryBox(ctx, hit);
@@ -928,6 +1039,20 @@ public sealed partial class DrawingService(SwSession session)
                 else
                     ctx.Warn($"'{info.Name}' reports no visible edges: it may be empty (seen in earlier testing). Check it in a PDF export (model_export) " +
                              "and move the circle onto the part's edges if so.");
+                if (labelAt is (double lx, double ly))
+                {
+                    var circle = ComArgs.Objects<IDetailCircle>(Safe(() => (object?)hit.View.GetDetailCircles(), null))
+                        .FirstOrDefault(dc => string.Equals(Safe(() => dc.GetLabel(), ""), lb, StringComparison.OrdinalIgnoreCase));
+                    if (circle is null) ctx.Warn($"The detail circle {lb} could not be found to place its label.");
+                    else
+                    {
+                        circle.SetLabelPosition(Units.M(lx), Units.M(ly));
+                        circle.GetLabelPosition(out double gx, out double gy);
+                        if (Math.Abs(gx - Units.M(lx)) < 1e-4 && Math.Abs(gy - Units.M(ly)) < 1e-4) checks.Add("circle label position read back");
+                        else ctx.Warn($"The circle's label reads at [{Fmt([gx * 1000, gy * 1000])}] mm.");
+                    }
+                }
+                LeaveViewSketch(ctx, d, drw, sheet, checks);
                 OverlapCheck(ctx, sheet, [dv], checks);
                 return new DrwViewResult { Doc = ctx.Title(d), View = info with { Parent = hit.Name }, Label = lb, Checks = checks };
             }
@@ -991,100 +1116,131 @@ public sealed partial class DrawingService(SwSession session)
     {
         string k = DrawingLayout.Norm(kind) ?? "linear";
         if (k is "aligned" or "smart") k = "linear";
-        if (k is not ("linear" or "horizontal" or "vertical" or "radial" or "diameter" or "angular"))
-            throw SwException.InvalidArgument($"Unknown kind '{kind}'.", "Use linear, horizontal, vertical, radial, diameter or angular.");
+        if (k is not ("linear" or "horizontal" or "vertical" or "radial" or "diameter" or "angular" or "chamfer"))
+            throw SwException.InvalidArgument($"Unknown kind '{kind}'.", "Use linear, horizontal, vertical, radial, diameter, angular or chamfer.");
+        if (k == "chamfer" && b is null)
+            throw SwException.InvalidArgument("A chamfer dimension needs the chamfer edge ('a') and a lead-in edge it meets ('b').");
         if (a is null) throw SwException.InvalidArgument("'a' is required: an edge or vertex of the view's model, e.g. {type:'edge', at:[x,y,z]}.");
         if (k is "radial" or "diameter" && b is not null) throw SwException.InvalidArgument($"A {k} dimension takes one circular edge ('a' only).");
         if (k == "angular" && b is null) throw SwException.InvalidArgument("An angular dimension needs two straight edges ('a' and 'b').");
         (double X, double Y)? text = textAtMm is null ? null : Sheet2(textAtMm, "textAtMm");
         var options = RunOptions.Write(doc) with { DialogRules = [DialogRules.ModifyDimension] };
-        return session.RunAsync("drw_dimension_add", ctx =>
-        {
-            var d = ctx.Doc;
-            var drw = ctx.Drawing();
-            var hit = FindView(ctx, drw, view, "view");
-            var model = ModelOf(hit);
-            var xf = hit.View.DrwModelToSheet();
-            if (xf.Length < 13)
-                throw new SwException(ErrorCodes.NotSupported, $"View '{hit.Name}' gives no model-to-sheet transform, so model references can't be placed in it.");
-            var t = new Xform(xf);
-            double s = SheetScale(xf, hit.View.ScaleDecimal);
-            bool part = model.GetType() == (int)swDocumentTypes_e.swDocPART;
-            var ra = EntityResolver.Resolve(ctx, model, a, "a", EntityKind.Edge, EntityKind.Vertex);
-            var rb = b is null ? null : EntityResolver.Resolve(ctx, model, b, "b", EntityKind.Edge, EntityKind.Vertex);
-            var ga = Seen(ra, t, part, "a");
-            var gb = rb is null ? null : Seen(rb, t, part, "b");
-            if (gb is not null && ga.Pick.DistanceTo(gb.Pick) < PosTol && ga.Kind == gb.Kind)
-                throw SwException.InvalidArgument("'a' and 'b' are drawn at the same place in this view.", "Pick two different edges or vertices.");
-            if (k is "radial" or "diameter" && !(ga.Kind == "circle" && ga.FaceOn))
-                throw SwException.InvalidArgument($"A {k} dimension needs a circular edge seen face-on; {ga.Label} is a {ga.Kind}{(ga.Kind == "circle" ? " seen edge-on" : "")} in '{hit.Name}'.");
-            if (k == "angular" && !(ga.Kind == "line" && gb!.Kind == "line"))
-                throw SwException.InvalidArgument("An angular dimension needs two straight edges.");
-            double? expected = Expected(k, ga, gb, s);
-            if (k == "angular" && expected is null)
-                throw SwException.InvalidArgument("The two edges are parallel in this view, so there is no angle between them.");
-            var outline = Outline(hit);
-            var picks = new List<(double, double)> { (ga.Pick.X * 1000, ga.Pick.Y * 1000) };
-            if (gb is not null) picks.Add((gb.Pick.X * 1000, gb.Pick.Y * 1000));
-            var tp = text ?? DrawingLayout.DimensionText(k, picks, outline);
+        return session.RunAsync("drw_dimension_add", ctx => DimensionAdd(ctx, view, a, b, k, text), options, ct);
+    }
 
-            var checks = new List<string>();
-            using var prefs = ctx.SystemPrefs();
-            prefs.Toggle(SystemPrefIds.InputDimValOnCreate, false); // no modal Modify box
-            Activate(drw, hit);
-            int before = Count(hit.View).Dimensions;
-            d.ClearSelection2(true);
-            SelectInView(ctx, d, hit, ra, ga, t, part, append: false, "a", checks);
-            if (rb is not null) SelectInView(ctx, d, hit, rb, gb!, t, part, append: true, "b", checks);
-            var dd = d.DrwAddDimension(k, Units.M(tp.X), Units.M(tp.Y));
-            d.ClearSelection2(true);
-            if (dd is null)
-                throw new SwException(ErrorCodes.FeatureFailed,
-                    $"SOLIDWORKS created no {k} dimension on {ra.Label}{(rb is null ? "" : $" and {rb.Label}")} in '{hit.Name}'.",
-                    "Check that the entities can carry this kind of dimension (two parallel lines or two points for a distance, a circle for radial/diameter).");
-            var dim = dd.GetDimension2(0);
-            if (dim is null)
+    /// <summary>One drawing dimension, verified (drw_dimension_add, and each step of a baseline or chain set).</summary>
+    private static DrwDimensionResult DimensionAdd(SwContext ctx, string? view, EntityRef a, EntityRef? b, string k, (double X, double Y)? text)
+    {
+        var d = ctx.Doc;
+        var drw = ctx.Drawing();
+        var hit = FindView(ctx, drw, view, "view");
+        var model = ModelOf(hit);
+        var xf = hit.View.DrwModelToSheet();
+        if (xf.Length < 13)
+            throw new SwException(ErrorCodes.NotSupported, $"View '{hit.Name}' gives no model-to-sheet transform, so model references can't be placed in it.");
+        var t = new Xform(xf);
+        double s = SheetScale(xf, hit.View.ScaleDecimal);
+        bool part = model.GetType() == (int)swDocumentTypes_e.swDocPART;
+        var ra = EntityResolver.Resolve(ctx, model, a, "a", EntityKind.Edge, EntityKind.Vertex);
+        var rb = b is null ? null : EntityResolver.Resolve(ctx, model, b, "b", EntityKind.Edge, EntityKind.Vertex);
+        var ga = Seen(ra, t, part, "a");
+        var gb = rb is null ? null : Seen(rb, t, part, "b");
+        if (gb is not null && ga.Pick.DistanceTo(gb.Pick) < PosTol && ga.Kind == gb.Kind)
+            throw SwException.InvalidArgument("'a' and 'b' are drawn at the same place in this view.", "Pick two different edges or vertices.");
+        if (k is "radial" or "diameter" && !(ga.Kind == "circle" && ga.FaceOn))
+            throw SwException.InvalidArgument($"A {k} dimension needs a circular edge seen face-on; {ga.Label} is a {ga.Kind}{(ga.Kind == "circle" ? " seen edge-on" : "")} in '{hit.Name}'.");
+        if (k is "angular" or "chamfer" && !(ga.Kind == "line" && gb!.Kind == "line"))
+            throw SwException.InvalidArgument($"An {k} dimension needs two straight edges as seen in this view.");
+        double? expected = k == "chamfer" ? null : Expected(k, ga, gb, s);
+        if (k == "angular" && expected is null)
+            throw SwException.InvalidArgument("The two edges are parallel in this view, so there is no angle between them.");
+        var outline = Outline(hit);
+        var picks = new List<(double, double)> { (ga.Pick.X * 1000, ga.Pick.Y * 1000) };
+        if (gb is not null) picks.Add((gb.Pick.X * 1000, gb.Pick.Y * 1000));
+        var tp = text ?? DrawingLayout.DimensionText(k == "chamfer" ? "linear" : k, picks, outline);
+        var frame = Frame(SheetOf(drw, hit));
+        if (text is null)
+        {
+            // The default spot is beside the view; near the border it would land outside the frame (seen live): clamp it in.
+            var (cx, cy, moved) = DrawingEdit.Clamp(tp.X, tp.Y, 20, 8, frame);
+            if (moved) { tp = (cx, cy); }
+        }
+        else if (!frame.Contains(tp.X, tp.Y))
+            ctx.Warn($"textAtMm [{Fmt([tp.X, tp.Y])}] is outside the drawing frame [{Fmt(frame.ToArray())}] mm.");
+
+        var checks = new List<string>();
+        using var prefs = ctx.SystemPrefs();
+        prefs.Toggle(SystemPrefIds.InputDimValOnCreate, false); // no modal Modify box
+        Activate(drw, hit);
+        int before = Count(hit.View).Dimensions;
+        d.ClearSelection2(true);
+        SelectInView(ctx, d, hit, ra, ga, t, part, append: false, "a", checks);
+        if (rb is not null) SelectInView(ctx, d, hit, rb, gb!, t, part, append: true, "b", checks);
+        var dd = k == "chamfer"
+            ? (object?)drw.AddChamferDim(Units.M(tp.X), Units.M(tp.Y), 0) as IDisplayDimension
+            : d.DrwAddDimension(k, Units.M(tp.X), Units.M(tp.Y));
+        d.ClearSelection2(true);
+        if (dd is null)
+            throw new SwException(ErrorCodes.FeatureFailed,
+                $"SOLIDWORKS created no {k} dimension on {ra.Label}{(rb is null ? "" : $" and {rb.Label}")} in '{hit.Name}'.",
+                "Check that the entities can carry this kind of dimension (two parallel lines or two points for a distance, a circle for radial/diameter).");
+        var dim = dd.GetDimension2(0);
+        if (dim is null)
+        {
+            DeleteDimension(d, dd);
+            throw new SwException(ErrorCodes.FeatureFailed, "The new display dimension has no dimension value; it was removed.");
+        }
+        bool angular = k == "angular" || dim.GetType() == (int)swDimensionParamType_e.swDimensionParamTypeDoubleAngular;
+        double v = dim.SystemValue;
+        if (expected is double e)
+        {
+            bool ok = angular
+                ? Math.Abs(v - e) < 1e-5 || Math.Abs(v - (Math.PI - e)) < 1e-5
+                : Math.Abs(v - e) <= Math.Max(1e-6, 1e-6 * Math.Abs(e));
+            if (!ok)
             {
-                DeleteDimension(d, dd);
-                throw new SwException(ErrorCodes.FeatureFailed, "The new display dimension has no dimension value; it was removed.");
+                bool gone = DeleteDimension(d, dd);
+                throw new SwException(ErrorCodes.VerifyFailed,
+                    $"SOLIDWORKS dimensioned {Show(v, angular)} instead of the {k} {Show(e, angular)} of {ra.Label}{(rb is null ? "" : $" and {rb.Label}")}; " +
+                    (gone ? "the dimension was removed." : "the dimension could not be removed."),
+                    "Pass textAtMm next to the quantity you want (beside a length, inside an angle), or use kind horizontal / vertical.");
             }
-            bool angular = k == "angular" || dim.GetType() == (int)swDimensionParamType_e.swDimensionParamTypeDoubleAngular;
-            double v = dim.SystemValue;
-            if (expected is double e)
+            checks.Add($"value {Show(v, angular)} matches the geometry");
+        }
+        if (k == "chamfer")
+        {
+            if (dd.GetType() != (int)swDimensionType_e.swChamferDimension)
             {
-                bool ok = angular
-                    ? Math.Abs(v - e) < 1e-5 || Math.Abs(v - (Math.PI - e)) < 1e-5
-                    : Math.Abs(v - e) <= Math.Max(1e-6, 1e-6 * Math.Abs(e));
-                if (!ok)
-                {
-                    bool gone = DeleteDimension(d, dd);
-                    throw new SwException(ErrorCodes.VerifyFailed,
-                        $"SOLIDWORKS dimensioned {Show(v, angular)} instead of the {k} {Show(e, angular)} of {ra.Label}{(rb is null ? "" : $" and {rb.Label}")}; " +
-                        (gone ? "the dimension was removed." : "the dimension could not be removed."),
-                        "Pass textAtMm next to the quantity you want (beside a length, inside an angle), or use kind horizontal / vertical.");
-                }
-                checks.Add($"value {Show(v, angular)} matches the geometry");
+                bool gone = DeleteDimension(d, dd);
+                throw new SwException(ErrorCodes.VerifyFailed, $"SOLIDWORKS made a {DimKind(dd.GetType())} dimension, not a chamfer dimension; it was {(gone ? "" : "not ")}removed.",
+                    "'a' must be the chamfer's edge and 'b' an edge it meets (the lead-in edge), both seen as lines in this view.");
             }
-            int after = Count(hit.View).Dimensions;
-            if (after == before + 1) checks.Add($"'{hit.Name}' has {after} dimension(s)");
-            else ctx.Warn($"'{hit.Name}' went from {before} to {after} dimension(s).");
-            var resolved = new List<ResolvedInfo> { ra.Info("a") };
-            if (rb is not null) resolved.Add(rb.Info("b"));
-            return new DrwDimensionResult
-            {
-                Doc = ctx.Title(d),
-                View = hit.Name,
-                Kind = k,
-                Dimension = FeatureVerifier.ShortName(dim.FullName),
-                Value = angular ? Units.Deg(v) : Units.Mm(v),
-                Unit = angular ? "deg" : "mm",
-                Expected = expected is double ex ? (angular ? Units.Deg(ex) : Units.Mm(ex)) : null,
-                Reference = dim.DrivenState == (int)swDimensionDrivenState_e.swDimensionDriven ? true : null,
-                TextAtMm = [Math.Round(tp.X, 3), Math.Round(tp.Y, 3)],
-                Checks = checks,
-                Resolved = resolved,
-            };
-        }, options, ct);
+            checks.Add("a chamfer dimension");
+        }
+        int after = Count(hit.View).Dimensions;
+        if (after == before + 1) checks.Add($"'{hit.Name}' has {after} dimension(s)");
+        else ctx.Warn($"'{hit.Name}' went from {before} to {after} dimension(s).");
+        if (dd.DrwAnnotation() is IAnnotation dan && (object?)dan.GetDisplayData() is IDisplayData ddata && DisplayBox(ddata) is SheetRect db)
+        {
+            if (db.Inside(frame, 0.5)) checks.Add("inside the drawing frame");
+            else ctx.Warn($"The dimension's box [{Fmt(db.ToArray())}] mm reaches outside the drawing frame [{Fmt(frame.ToArray())}] mm; move it with drw_dimension_set textAtMm.");
+        }
+        var resolved = new List<ResolvedInfo> { ra.Info("a") };
+        if (rb is not null) resolved.Add(rb.Info("b"));
+        return new DrwDimensionResult
+        {
+            Doc = ctx.Title(d),
+            View = hit.Name,
+            Kind = k,
+            Dimension = FeatureVerifier.ShortName(dim.FullName),
+            Value = angular ? Units.Deg(v) : Units.Mm(v),
+            Unit = angular ? "deg" : "mm",
+            Expected = expected is double ex ? (angular ? Units.Deg(ex) : Units.Mm(ex)) : null,
+            Reference = dim.DrivenState == (int)swDimensionDrivenState_e.swDimensionDriven ? true : null,
+            TextAtMm = [Math.Round(tp.X, 3), Math.Round(tp.Y, 3)],
+            Checks = checks,
+            Resolved = resolved,
+        };
     }
 
     /// <summary>How a resolved model entity appears on the sheet.</summary>
@@ -1327,14 +1483,26 @@ public sealed partial class DrawingService(SwSession session)
 
     // ================================================================== drw_note_add
 
-    public Task<DrwNoteResult> NoteAddAsync(string? text, double[]? atMm, double? heightMm, string? view, string? doc, CancellationToken ct = default)
+    public Task<DrwNoteResult> NoteAddAsync(string? text, double[]? atMm, double? heightMm, string? view, string? doc, CancellationToken ct = default) =>
+        NoteAddAsync(text, atMm, heightMm, view, null, doc, ct);
+
+    /// <summary>
+    /// drw_note_add. With <paramref name="attachTo"/> (an edge or vertex of the view's model, model mm) the note gets a leader
+    /// to it: the entity is picked at its sheet position in the active view, then IModelDoc2.InsertNote attaches to the
+    /// selection (the VBA recipe the tool replaces). Verified: attached to one entity, else removed.
+    /// </summary>
+    public Task<DrwNoteResult> NoteAddAsync(string? text, double[]? atMm, double? heightMm, string? view, EntityRef? attachTo, string? doc,
+        CancellationToken ct = default)
     {
         if (string.IsNullOrWhiteSpace(text)) throw SwException.InvalidArgument("'text' is empty.");
         if (text.Length > 4000) throw SwException.InvalidArgument($"'text' is {text.Length} characters long (at most 4000).");
         var at = Sheet2(atMm, "atMm");
         if (heightMm is double hm && (!double.IsFinite(hm) || hm < 0.5 || hm > 500))
             throw SwException.InvalidArgument($"heightMm must be between 0.5 and 500 (got {hm}).");
-        string apiText = text.Replace("\r\n", "\n").Replace("\n", "\r\n");
+        if (attachTo is not null && view is null)
+            throw SwException.InvalidArgument("'attachTo' needs 'view': the view whose model the entity belongs to.");
+        // Real line breaks, and the escape \n that agents send for one (it used to land as a literal backslash-n).
+        string apiText = DrawingEdit.NoteText(text);
         return session.RunAsync("drw_note_add", ctx =>
         {
             var d = ctx.Doc;
@@ -1344,17 +1512,43 @@ public sealed partial class DrawingService(SwSession session)
             if (hit is not null) Activate(drw, hit);
             else OnSheetOnly(ctx, drw, sheet);
             d.ClearSelection2(true); // a selected entity would get the note as a leader
-            var note = d.DrwInsertNote(apiText)
-                       ?? throw new SwException(ErrorCodes.FeatureFailed, "SOLIDWORKS created no note.", "Check that the drawing is not in sheet-format edit mode.");
-            var an = note.DrwAnnotation() ?? throw new SwException(ErrorCodes.Internal, "The new note has no annotation.");
             var checks = new List<string>();
+            Resolved? target = null;
+            if (attachTo is not null)
+            {
+                var model = ModelOf(hit!);
+                var xf = hit!.View.DrwModelToSheet();
+                if (xf.Length < 13)
+                    throw new SwException(ErrorCodes.NotSupported, $"View '{hit.Name}' gives no model-to-sheet transform, so 'attachTo' can't be placed in it.");
+                var t = new Xform(xf);
+                bool part = model.GetType() == (int)swDocumentTypes_e.swDocPART;
+                target = EntityResolver.Resolve(ctx, model, attachTo, "attachTo", EntityKind.Edge, EntityKind.Vertex);
+                var g = Seen(target, t, part, "attachTo");
+                SelectInView(ctx, d, hit, target, g, t, part, append: false, "attachTo", checks, pickFirst: true);
+            }
+            var note = d.DrwInsertNote(apiText);
+            d.ClearSelection2(true);
+            if (note is null)
+                throw new SwException(ErrorCodes.FeatureFailed, "SOLIDWORKS created no note.", "Check that the drawing is not in sheet-format edit mode.");
+            var an = note.DrwAnnotation() ?? throw new SwException(ErrorCodes.Internal, "The new note has no annotation.");
+            if (target is not null)
+            {
+                int attached = Safe(() => an.GetAttachedEntityCount3(), 0);
+                if (attached < 1)
+                {
+                    bool gone = DeleteAnnotation(d, an);
+                    throw new SwException(ErrorCodes.VerifyFailed, $"The note was created without a leader to {target.Label}; it was {(gone ? "" : "not ")}removed.",
+                        "Pick an edge or vertex that is visible in the view.");
+                }
+                checks.Add($"leader attached to {target.Label}");
+            }
             bool placed = an.SetPosition2(Units.M(at.X), Units.M(at.Y), 0);
             double? height = null;
             if (heightMm is double h) height = SetNoteHeight(ctx, note, an, Units.M(h));
             d.ClearSelection2(true);
 
-            string got = (note.GetText() ?? "").Replace("\r\n", "\n");
-            string want = text.Replace("\r\n", "\n");
+            string got = DrawingEdit.Plain(note.GetText());
+            string want = DrawingEdit.Plain(apiText);
             if (got != want)
             {
                 // Property links ($PRP:...) and formatting tags read back evaluated; plain text must match exactly.
@@ -1384,11 +1578,13 @@ public sealed partial class DrawingService(SwSession session)
             {
                 Doc = ctx.Title(d),
                 Note = noteName,
-                Text = text,
+                Text = got,
                 AtMm = pos.Length >= 2 ? [Math.Round(pos[0] * 1000, 3), Math.Round(pos[1] * 1000, 3)] : null,
                 HeightMm = height is double hh ? Units.Mm(hh) : Units.Mm(note.GetHeight()),
                 View = hit?.Name,
+                AttachedTo = target?.Label,
                 Checks = checks,
+                Resolved = target is null ? null : [target.Info("attachTo")],
             };
         }, RunOptions.Write(doc), ct);
     }

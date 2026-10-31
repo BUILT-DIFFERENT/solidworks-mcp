@@ -110,6 +110,32 @@ public sealed class PartFeatureTools(SwSession session)
             End = end, DepthMm = depthMm, Name = name, KeepOnFailure = keepOnFailure,
         }, cancellationToken), progress, "feature_hole");
 
+    [McpServerTool(Name = "feature_hole_edit", Title = "Edit Hole Wizard hole", ReadOnly = false, Destructive = false, Idempotent = true, OpenWorld = false)]
+    [Description("Change an existing Hole Wizard hole in place (it keeps its name, so mates and references stay): kind, size, fit, " +
+                 "end, depth, counterbore/countersink sizes, by feature_hole's names (no type numbers); unset settings stay. Verified: " +
+                 "definition read back, no rebuild error, the main cylinder at the planned diameter; otherwise undone.")]
+    public Task<string> FeatureHoleEdit(
+        IProgress<ProgressNotificationValue> progress,
+        [Description("The hole feature's name (feature_list).")] string feature,
+        [Description("drill | clearance | counterbore | countersink | tapped; default: as it is.")] string? type = null,
+        [Description("Screw size \"M5\" or a drill size \"Ø6\".")] string? size = null,
+        [Description("Drill diameter mm (others: overrides the through hole's).")] double? diameterMm = null,
+        [Description("close | normal | loose")] string? fit = null,
+        [Description("blind | through_all; default: as it is.")] string? end = null,
+        [Description("Blind depth in mm.")] double? depthMm = null,
+        [Description("ansi_metric | iso | ansi_inch")] string? standard = null,
+        [Description("Countersink top diameter mm.")] double? csinkDiameterMm = null,
+        [Description("Countersink angle in degrees.")] double? csinkAngleDeg = null,
+        [Description("Counterbore diameter mm.")] double? cboreDiameterMm = null,
+        [Description("Counterbore depth mm.")] double? cboreDepthMm = null,
+        [Description(DocDesc)] string? doc = null,
+        CancellationToken cancellationToken = default) =>
+        Output.Json(_svc.HoleEditAsync(new HoleEditRequest
+        {
+            Doc = doc, Feature = feature, Type = type, Size = size, DiameterMm = diameterMm, Fit = fit, End = end, DepthMm = depthMm, Standard = standard,
+            CsinkDiameterMm = csinkDiameterMm, CsinkAngleDeg = csinkAngleDeg, CboreDiameterMm = cboreDiameterMm, CboreDepthMm = cboreDepthMm,
+        }, cancellationToken), progress, "feature_hole_edit");
+
     [McpServerTool(Name = "feature_pattern_linear", Title = "Linear pattern", ReadOnly = false, Destructive = false, Idempotent = false, OpenWorld = false)]
     [Description("Linear pattern / array of features along a model axis (\"+x\") or a straight edge, axis or planar face, optionally in a " +
                  "second direction; counts include the seed. Verified: an LPattern feature without errors, the volume or faces changed, and " +

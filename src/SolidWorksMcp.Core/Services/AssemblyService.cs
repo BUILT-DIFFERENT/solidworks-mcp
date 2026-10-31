@@ -77,6 +77,11 @@ public sealed record AsmMateRequest
     /// <summary>rack_pinion: rack travel per pinion revolution (π × pitch diameter).</summary>
     public double? PitchMm { get; init; }
     public bool KeepOnFailure { get; init; }
+    /// <summary>this (SOLIDWORKS' default: other configurations may get it suppressed) | all (active in every configuration).</summary>
+    public string? Configurations { get; init; }
+    /// <summary>distance between planes: outside (b in front of a's face normal) | inside (behind it); flip is chosen to match.</summary>
+    public string? Side { get; init; }
+    internal bool SideRetried { get; init; }
 }
 
 /// <summary>asm_component_set options (null = leave as it is).</summary>
@@ -161,6 +166,8 @@ public sealed class AsmMateEntity
     public string? Component { get; init; }
     /// <summary>point | line | circle | plane | cylinder | sphere | cone | … (IMateEntity2.ReferenceType2).</summary>
     public required string Kind { get; init; }
+    /// <summary>The part feature that made the face or edge (e.g. "Hole1"): editing it can break the mate.</summary>
+    public string? Feature { get; init; }
 }
 
 public sealed class AsmMateInfo
@@ -190,6 +197,8 @@ public sealed class AsmMateAddResult : ToolResult
     /// <summary>The components the mate moved.</summary>
     public IReadOnlyList<string>? Moved { get; init; }
     public IReadOnlyList<ResolvedInfo>? Resolved { get; init; }
+    /// <summary>Configurations in which the new mate is suppressed.</summary>
+    public IReadOnlyList<string>? SuppressedIn { get; init; }
 }
 
 public sealed class AsmMateListResult : ToolResult
@@ -410,6 +419,14 @@ public sealed partial class AssemblyService(SwSession session)
     public Task<AsmMateAddResult> MateAddAsync(AsmMateRequest q, CancellationToken ct = default)
     {
         var (type, typeName) = AsmParse.MateType(q.Type);
+        if (AsmParse.Norm(q.Configurations) is not (null or "this" or "all"))
+            throw SwException.InvalidArgument($"Unknown configurations '{q.Configurations}'.", "Use this (SOLIDWORKS' default) or all.");
+        if (q.Side is not null)
+        {
+            if (AsmParse.Norm(q.Side) is not ("outside" or "inside"))
+                throw SwException.InvalidArgument($"Unknown side '{q.Side}'.", "Use outside (b in front of a's face) or inside (behind it).");
+            if (typeName != "distance") throw SwException.InvalidArgument("'side' applies to distance mates.");
+        }
         var (align, _) = AsmParse.Alignment(q.Alignment);
         var spec = MateSpecOf(typeName, q);
         if (q.A is null || q.B is null)
@@ -628,6 +645,40 @@ public sealed partial class AssemblyService(SwSession session)
             throw new SwException(code, $"asm_mate_add: the {label} {what}: {problem}. {tail}", hint);
         }
 
+        // Which side of a's face b ended on: wrong → the mate is made again flipped (once), then checked again.
+        if (q.Side is not null && AsmParse.Norm(q.Side) is string want)
+        {
+            int side = AsmMateIntent.Side(ToAsm(ctx, a), ToAsm(ctx, b));
+            if (side == 0) ctx.Warn("'side' could not be judged (a and b are not two parallel planes); the mate was kept as SOLIDWORKS solved it.");
+            else if ((side > 0) != (want == "outside"))
+            {
+                string tail = RollbackMate(ctx, d, asm, created, rawBefore);
+                if (q.SideRetried)
+                    throw new SwException(ErrorCodes.VerifyFailed, $"asm_mate_add: b stays {(side > 0 ? "outside" : "inside")} a's face with flip either way. {tail}",
+                        "Check which face is a: 'outside' is the side its normal points to (away from its material).");
+                return MateAdd(ctx, q with { Flip = !q.Flip, SideRetried = true }, type, typeName, align, spec);
+            }
+            else checks.Add($"b is {want} a's face{(q.SideRetried ? " (flipped to get there)" : "")}");
+        }
+        // Configurations: SOLIDWORKS may suppress new mates in the other configurations.
+        List<string>? suppressedIn = null;
+        var configs = d.ConfigNames();
+        if (configs.Length > 1)
+        {
+            if (AsmParse.Norm(q.Configurations) == "all")
+            {
+                if (!main.Feature.SetSuppression2((int)swFeatureSuppressionAction_e.swUnSuppressFeature, (int)swInConfigurationOpts_e.swAllConfiguration, ComArgs.Empty))
+                    ctx.Warn("SetSuppression2 (unsuppress in all configurations) returned false.");
+            }
+            var flags = ComArgs.Objects<object>(Safe(() => (object?)main.Feature.IsSuppressed2((int)swInConfigurationOpts_e.swSpecifyConfiguration, configs), null));
+            suppressedIn = configs.Where((c, i) => i < flags.Count && flags[i] is bool sup && sup).ToList();
+            if (suppressedIn.Count == 0) checks.Add($"active in all {configs.Length} configurations");
+            else if (AsmParse.Norm(q.Configurations) == "all")
+                ctx.Warn($"'{main.Name}' is still suppressed in {string.Join(", ", suppressedIn.Take(6))}.");
+            else
+                ctx.Warn($"'{main.Name}' is suppressed in {suppressedIn.Count} other configuration(s) ({string.Join(", ", suppressedIn.Take(6))}); pass configurations:'all' to keep it everywhere.");
+        }
+
         var moved = asm.Components(true)
             .Where(c => rawBefore.TryGetValue(c.Name2, out var r0) && AsmMath.Changed(r0, Safe(() => c.AsmXformData(), r0)))
             .Select(c => c.Name2).ToList();
@@ -645,6 +696,7 @@ public sealed partial class AssemblyService(SwSession session)
             Components = infos,
             Moved = moved.Count > 0 ? moved : null,
             Resolved = resolved,
+            SuppressedIn = suppressedIn is { Count: > 0 } ? suppressedIn : null,
         };
     }
 
@@ -850,13 +902,25 @@ public sealed partial class AssemblyService(SwSession session)
     // ================================================================== asm_mate_list
 
     public Task<AsmMateListResult> MateListAsync(string? doc, int limit = 100, int offset = 0, CancellationToken ct = default) =>
+        MateListAsync(doc, limit, offset, null, null, ct);
+
+    /// <summary>
+    /// asm_mate_list; with <paramref name="feature"/> only the mates that reference faces or edges that feature made (on
+    /// <paramref name="component"/>, when given): the mates an edit of that feature can break.
+    /// </summary>
+    public Task<AsmMateListResult> MateListAsync(string? doc, int limit, int offset, string? feature, string? component, CancellationToken ct = default) =>
         session.RunAsync("asm_mate_list", ctx =>
         {
             var asm = ctx.Assembly();
             var d = (IModelDoc2)asm;
-            var mates = Mates(d);
+            var all = Mates(d).Select(m => (m, Row: MateRow(m))).ToList();
+            if (component is not null && feature is null) throw SwException.InvalidArgument("'component' goes with 'feature'.");
+            if (feature is not null)
+                all = all.Where(x => x.Row.Entities.Any(e => string.Equals(e.Feature, feature.Trim(), StringComparison.OrdinalIgnoreCase) &&
+                                                            (component is null || string.Equals(e.Component, component.Trim(), StringComparison.OrdinalIgnoreCase)))).ToList();
+            var mates = all.Select(x => x.m).ToList();
             int skip = Math.Max(0, offset), take = Math.Clamp(limit, 1, 500);
-            var rows = mates.Skip(skip).Take(take).Select(MateRow).ToList();
+            var rows = all.Skip(skip).Take(take).Select(x => x.Row).ToList();
             return new AsmMateListResult
             {
                 Doc = ctx.Title(d),
@@ -1741,6 +1805,18 @@ public sealed partial class AssemblyService(SwSession session)
     private static List<string> MateNamesOf(IModelDoc2 d, string component) =>
         Mates(d).Where(m => MateComponents(m.Mate).Any(n => Eq(n, component))).Select(m => m.Name).ToList();
 
+    /// <summary>The feature that made a mate's face (IFace2.GetFeature) or edge (its first adjacent face's feature), else null.</summary>
+    private static string? OwnerFeature(object? reference)
+    {
+        IFace2? face = reference switch
+        {
+            IFace2 f => f,
+            IEdge e => ComArgs.Objects<IFace2>((object?)e.GetTwoAdjacentFaces2()).FirstOrDefault(),
+            _ => null,
+        };
+        return face is null ? null : ((object?)face.GetFeature() as IFeature)?.Name;
+    }
+
     private static AsmMateInfo MateRow(MateFeat mf)
     {
         var m = mf.Mate;
@@ -1751,6 +1827,7 @@ public sealed partial class AssemblyService(SwSession session)
             // ReferenceType is the geometric kind (swMateEntity2ReferenceType_e); ReferenceType2 is a swSelectType_e
             // (live: 4 = swSelDATUMPLANES for a plane mate, which read as "cylinder" when taken for the other enum).
             Kind = Safe(() => e.ReferenceType, -1) is int rt and >= 0 ? AsmParse.RefTypeName(rt) : AsmParse.SelTypeName(Safe(() => e.ReferenceType2, -1)),
+            Feature = Safe(() => OwnerFeature((object?)e.Reference), null),
         }).ToList();
         var dims = Safe(() => FeatureVerifier.Dimensions(mf.Feature), new List<DimensionInfo>());
         var dim = dims.FirstOrDefault(x => x.Unit is "mm" or "deg");

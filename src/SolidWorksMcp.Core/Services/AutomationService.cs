@@ -1,3 +1,4 @@
+using System.Runtime.InteropServices;
 using System.Text;
 using SolidWorks.Interop.sldworks;
 using SolidWorksMcp.Core.Com;
@@ -47,7 +48,28 @@ public sealed class AutomationService(SwSession session)
                 string docName = target is null ? "" : (DocumentRegistry.SafePath(target) is { Length: > 0 } p ? p : ctx.Title(target));
                 File.WriteAllText(macro, VbaText.Wrap(code, outFile, docName), Encoding.ASCII);
                 int err = 0;
-                bool ok = ctx.App.RunMacro2(macro, module, "main", 0, out err);
+                // On a document the server may edit, the macro's changes become one named undo step that doc_undo may take
+                // back (it counts server changes only): recorded as one object, and booked as a server change afterwards.
+                var entry = target is null ? null : ctx.Documents.Find(target);
+                bool undoable = entry is { Class: DocClass.Owned or DocClass.Adopted };
+                int stampBefore = target?.GetUpdateStamp() ?? 0;
+                bool recording = false;
+                if (undoable)
+                {
+                    try { target!.Extension.StartRecordingUndoObject(); recording = true; }
+                    catch (COMException e) when (!ComArgs.IsDisconnect(e)) { /* the macro still runs; undo then counts its steps as one */ }
+                }
+                bool ok;
+                try { ok = ctx.App.RunMacro2(macro, module, "main", 0, out err); }
+                finally
+                {
+                    if (recording)
+                    {
+                        try { target!.Extension.FinishRecordingUndoObject2("vba_run", false); }
+                        catch (COMException e) when (!ComArgs.IsDisconnect(e)) { ctx.Warn("The macro's changes could not be grouped into one undo step."); }
+                    }
+                }
+                if (undoable) BookServerChange(entry!, target!, stampBefore);
                 var lines = ReadShared(outFile);
                 bool compiled = lines.Length > 0 && lines[0] == "started";
                 var output = lines.Skip(1).Where(l => l.StartsWith("O|")).Select(l => VbaText.Unescape(l[2..])).ToList();
@@ -92,6 +114,26 @@ public sealed class AutomationService(SwSession session)
                 try { File.Delete(outFile); } catch { /* temp */ }
             }
         }, RunOptions.Read(doc) with { Timeout = timeout, DialogRules = [DialogRules.VbaRuntimeError], OptionalDoc = true }, ct);
+    }
+
+    /// <summary>
+    /// Counts a vba_run that changed an owned or adopted document as one change by this server, so doc_undo may take it
+    /// back. Only when nobody else changed the document since the server's last operation (the stamp chain holds).
+    /// </summary>
+    private static void BookServerChange(DocumentRegistry.Entry e, IModelDoc2 doc, int stampBefore)
+    {
+        try
+        {
+            int now = doc.GetUpdateStamp();
+            if (now == stampBefore) return;
+            bool chainedStart = e.StampAfterLastOp is null || e.StampAfterLastOp == stampBefore;
+            if (!chainedStart) return; // changed outside the server before the macro: undo stays refused
+            bool chained = e.ServerWritesStamp is int s && s == stampBefore;
+            e.ServerWrites = (chained ? e.ServerWrites : 0) + 1;
+            e.ServerWritesStamp = now;
+            e.StampAfterLastOp = now;
+        }
+        catch (COMException ex) when (!ComArgs.IsDisconnect(ex)) { /* the macro may have closed it */ }
     }
 
     /// <summary>

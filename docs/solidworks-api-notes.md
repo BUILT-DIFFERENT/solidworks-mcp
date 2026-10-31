@@ -488,6 +488,58 @@ type libraries and writes `sldworks_api.txt`, `swconst_enums.txt`, `swcommands.t
   leader then ends at the edge's start (a view corner). `SelectByID2("", "EDGE", sheetX, sheetY, z, …)` in the active view
   selects **two** objects, the view itself (type 12) and the edge: deselect the view, and the leader ends at the pick.
 
+## 9a. Editing drawings (UNVERIFIED: from the interop signatures, not yet run live)
+These are the calls behind the drawing-editing tools (DESIGN §7.3). They compile against the 2024 and 2025 interop;
+mark each VERIFIED here once its live test passes.
+- **Annotations of a view:** `IView.GetAnnotations` on views found by traversal (§9); `IAnnotation.GetSpecificAnnotation`
+  → `IDisplayDimension`, `INote`, `ITableAnnotation`, `IDatumTag`, …; `GetName`, `GetPosition`, `SetPosition2`,
+  `GetLeaderCount` / `GetLeaderPointsAtIndex`, `GetAttachedEntityCount3` / `GetAttachedEntities3` /
+  `GetAttachedEntityTypes` (swSelectType_e), `IsDangling`, `OwnerType` (2 = sheet format).
+- **Text:** `INote.GetText` is the shown text, `INote.PropertyLinkedText` the stored one ($PRPSHEET:"…"); `INote.SetText`.
+  Note boxes: `INote.GetExtent` (two corners). Other annotations: `IAnnotation.GetDisplayData` lines, arcs and text runs.
+- **Dimension text:** `IDisplayDimension.SetText(swDimensionTextParts_e, text)`: prefix 1, suffix 2, above 3, below 4;
+  their stored forms read with 5..8 (Ø may read back as `<MOD-DIAM>`). `ShowParenthesis`. Precision:
+  `SetPrecision3(primary, dual, primaryTol, dualTol)` with -1 = don't change, -2 = follow the document;
+  `GetPrimaryPrecision2`, `GetPrimaryTolPrecision2`, `GetUseDocPrecision`.
+- **Tolerance:** `IDimension.Tolerance` → `IDimensionTolerance.Type` (swTolType_e: none 0, basic 1, bilateral 2, limit 3,
+  symmetric 4, min 5, max 6, fit 7), `SetValues2(min, max, swSetValue_UseCurrentSetting, null)` with signed deviations in
+  m (or rad), `GetMinValue2/GetMaxValue2(out v)`, `SetFitValues(hole, shaft)`.
+- **Delete by name:** select (`IAnnotation.Select2`, `SelectByID2(name, "DRAWINGVIEW" | "SECTIONLINE")`,
+  `IDetailCircle.Select`, `ISketchSegment.Select4`) and `IModelDocExtension.DeleteSelection2(0)`; check it is gone.
+- **Views:** `IView.Position` is not the outline centre for every view type: move by the outline's offset and read
+  `GetOutline` again. `ScaleDecimal` with `UseSheetScale = 0`; `ReferencedConfiguration` (settable);
+  `RemoveAlignment`, `AlignWithView(swAlignViewTypes_e, baseView)`, `GetAlignment`; `PositionLocked`.
+- **Section options:** `CreateSectionViewAt5(x, y, 0, label, options, excludedComponents, depth)`: options
+  swCreateSectionViewAtOptions_e (4 = change direction); excluded components as a dispatch array of the assembly's
+  `IComponent2`. Afterwards `IView.GetSection` → `IDrSection`: `SetAutoHatch`, `GetExcludedComponents`,
+  `GetReversedCutDirection`. Detail circles: `IView.GetDetailCircles` → `IDetailCircle.SetLabelPosition(x, y)`.
+- **Leaving the view sketch:** after the view command, if `SketchManager.ActiveSketch` is not the sheet's sketch,
+  `SketchManager.InsertSketch(true)`, then `ActivateView(sheetName)` (or `ActivateSheet`).
+- **Chamfer dimension:** chamfer edge then lead-in edge selected in the active view, `IDrawingDoc.AddChamferDim(x, y, 0)`;
+  its `IDisplayDimension.GetType()` is 10 (swChamferDimension).
+- **Leader note:** the entity picked at its sheet position (§9 "leaders attach where the edge was picked"), then
+  `IModelDoc2.InsertNote(text)`; attached = `GetAttachedEntityCount3() ≥ 1`.
+- **Sheet format fields:** notes of the sheet view whose `OwnerType` is 2; otherwise read and edit them between
+  `IDrawingDoc.EditTemplate()` and `EditSheet()`. Drawing properties: `CustomPropertyManager[""].Add3(name, 30, value, 2)`.
+- **Hatches:** `IView.GetFaceHatches` → `IFaceHatch`: `Pattern`, `Angle` (rad), `Scale2`, `UseMaterialHatch`,
+  `SolidFill`, `Face` (its component through `IEntity.GetComponent`).
+- **Tables:** `ITableAnnotation.Text[r, c]` (set and read), `DisplayedText`, `IsCellTextEditable`, `MoveRow/MoveColumn(src,
+  swTableItemInsertPosition_e, dst)`, `InsertColumn2`, `SetColumnWidth/SetRowHeight(i, m, 0)`, `Get/SetTextFormat`;
+  BOM columns: `SetColumnType(i, 204)` then `IBomTableAnnotation.SetColumnCustomProperty`.
+- **Hole edit:** `IFeature.GetDefinition` → `IWizardHoleFeatureData2`, `AccessSelections(doc, null)`,
+  `InitializeHole(generic, standard, fastener, size, end)`, `EndCondition`, `Depth`, `Diameter`, `CounterSinkDiameter`,
+  `CounterSinkAngle`, `CounterBoreDiameter/Depth`, then `IFeature.ModifyDefinition(data, doc, null)`; undo on failure.
+- **Drafting standard:** `IModelDocExtension.LoadDraftingStandard(path)` / `SaveDraftingStandard(path)`; document
+  options through `Get/SetUserPreferenceToggle|Integer|Double|String(id, 0, …)` and `Get/SetUserPreferenceTextFormat` for
+  text heights (swUserPreferenceTextFormat_e: notes 0, dimensions 1, BOM 11). Ids used by name: leading zeros 265
+  (1 standard, 2 show, 3 remove), linear decimals 24, tolerance decimals 25, angle decimals 28, trailing zeros 15,
+  dimension arrows 16 (swArrowStyle_e), note alignment 30, dimension standard 13.
+- **Undo objects:** `IModelDocExtension.StartRecordingUndoObject()` … `FinishRecordingUndoObject2(name, false)` groups
+  the calls between them into one undo step (`drw_batch`, `vba_run`).
+- **Mates in all configurations:** `IFeature.SetSuppression2(swUnSuppressFeature, swAllConfiguration, null)`, checked
+  with `IsSuppressed2(swSpecifyConfiguration, names)`.
+- **Zoom to a sheet rectangle:** `IModelDoc2.ViewZoomTo2(x1, y1, 0, x2, y2, 0)` in sheet m (drawings).
+
 ## 10. Export (system preferences: always restore)
 - **Through `SaveAs`, by extension:** `.step/.stp`, `.igs`, `.x_t`, `.stl` (written with an **uppercase `.STL`**
   extension), `.3mf`, `.eprt`, `.pdf`, `.png` (a real PNG of the viewport, about 1805 × 986).

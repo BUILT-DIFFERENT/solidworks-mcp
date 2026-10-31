@@ -704,21 +704,54 @@ internal static class PrefAudit
         return values;
     }
 
-    /// <summary>Warns (result and log) about options that differ from <paramref name="before"/> after the scope was restored.</summary>
+    /// <summary>
+    /// After the scope was restored: options that still differ from <paramref name="before"/> changed by SOLIDWORKS itself
+    /// (opening a document recomputes the STL deviation, system double 2). The user's value is written back and checked;
+    /// values SOLIDWORKS derives from a preset the user chose (STL deviation and angle under coarse or fine quality) are
+    /// left, since writing them would switch the quality to custom. Only a failed put-back is reported.
+    /// </summary>
     public static void Check(SwContext ctx, Dictionary<(PrefKind Kind, int Pref), string> before)
     {
         var journaled = ctx.Session.Journal.Entries.Select(e => (e.Kind, e.Pref)).ToHashSet(); // already reported by the scope
-        var drift = new List<string>();
+        var drifted = new List<(PrefKind, int, string)>();
         foreach (var ((kind, pref), old) in before)
         {
             if (journaled.Contains((kind, pref))) continue;
             string now;
             try { now = PreferenceScope.Read(ctx.App, kind, pref); }
             catch (COMException) { continue; }
-            if (!PreferenceScope.Same(kind, now, old)) drift.Add($"{kind} {pref} was {old}, now {now}");
+            if (!PreferenceScope.Same(kind, now, old)) drifted.Add((kind, pref, old));
         }
-        if (drift.Count == 0) return;
-        string message = $"SOLIDWORKS system options changed during this call and are not back to the user's values: {string.Join("; ", drift)}. " +
+        if (drifted.Count == 0) return;
+        string? ReadNow(PrefKind k, int p)
+        {
+            try { return PreferenceScope.Read(ctx.App, k, p); }
+            catch (COMException) { return null; }
+        }
+        var failed = new List<string>();
+        var restored = new List<string>();
+        foreach (var (kind, pref, old, action) in PrefDrift.Plan(drifted, ReadNow, before))
+        {
+            if (action == DriftAction.Derived)
+            {
+                ctx.Session.Log.LogDebug("{Operation}: system {Kind} {Pref} recomputed by SOLIDWORKS from the STL quality preset; left as it is.", ctx.Op.Name, kind, pref);
+                continue;
+            }
+            string? now = ReadNow(kind, pref);
+            try
+            {
+                if (now is not null && !PreferenceScope.Same(kind, now, old)) PreferenceScope.Write(ctx.App, kind, pref, old);
+            }
+            catch (COMException) { /* checked below */ }
+            string? after = ReadNow(kind, pref);
+            if (after is not null && PreferenceScope.Same(kind, after, old)) restored.Add($"{kind} {pref}");
+            else failed.Add($"{kind} {pref} was {old}, now {after ?? now ?? "?"}");
+        }
+        if (restored.Count > 0)
+            ctx.Session.Log.LogInformation("{Operation}: SOLIDWORKS changed system options {Options} during the call; the user's values were put back.",
+                ctx.Op.Name, string.Join(", ", restored));
+        if (failed.Count == 0) return;
+        string message = $"SOLIDWORKS system options changed during this call and could not be put back to the user's values: {string.Join("; ", failed)}. " +
                          "Tell the user (Tools > Options > System Options).";
         ctx.Warn(message);
         ctx.Session.Log.LogWarning("{Operation}: {Message}", ctx.Op.Name, message);

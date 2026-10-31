@@ -360,6 +360,9 @@ public sealed class FeatureManagementService(SwSession session)
         FacesRemoved = Try(() => s.FacesRemovedCount),
     };
 
+    /// <summary>A Hole Wizard definition as feature_info reports it (feature_hole_edit reads before and after with it).</summary>
+    internal static FeatureDefinition Definition(IWizardHoleFeatureData2 h) => Hole(h);
+
     private static FeatureDefinition Hole(IWizardHoleFeatureData2 h)
     {
         int end = Try(() => h.EndCondition) ?? -1;
@@ -1000,7 +1003,8 @@ public sealed class FeatureManagementService(SwSession session)
             var entry = ctx.DocEntry;
             if (entry.Class is not (DocClass.Owned or DocClass.Adopted))
                 throw new SwException(ErrorCodes.NotOwned, $"'{entry.Title}' is the user's document; the server doesn't undo in it.");
-            RequireNoOpenSketch(ctx, d, "undo would act on the sketch edits");
+            // A drawing always reports a sketch as active (the sheet's, or the active view's): that's no open sketch edit.
+            if (d.GetType() != (int)swDocumentTypes_e.swDocDRAWING) RequireNoOpenSketch(ctx, d, "undo would act on the sketch edits");
             int stamp = d.GetUpdateStamp();
             if (entry.StampAfterLastOp is not int last || last != stamp)
                 throw new SwException(ErrorCodes.NotOwned,
@@ -1037,7 +1041,7 @@ public sealed class FeatureManagementService(SwSession session)
 
             if (entry.LastSketch is { } ls && !namesAfter.ContainsValue(ls)) entry.LastSketch = null;
             string? open = null;
-            if (d.SketchManager?.ActiveSketch is ISketch sketch)
+            if (d.GetType() != (int)swDocumentTypes_e.swDocDRAWING && d.SketchManager?.ActiveSketch is ISketch sketch)
             {
                 open = ((IFeature)sketch).Name;
                 entry.ServerSketch = open; // the server's own step was undone, so the sketch is the server's
