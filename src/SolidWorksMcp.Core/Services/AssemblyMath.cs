@@ -141,6 +141,17 @@ internal static class AsmMateIntent
     public const double AngTol = 1e-6; // rad
 
     private static bool IsPlane(AsmGeo g) => g.Kind == 'p';
+
+    /// <summary>
+    /// Which side of plane a the plane b lies on: +1 in front of a's normal (outside a face's material), −1 behind it,
+    /// 0 when they aren't two parallel planes or b lies on a.
+    /// </summary>
+    public static int Side(AsmGeo a, AsmGeo b)
+    {
+        if (!IsPlane(a) || !IsPlane(b) || AsmMath.LineAngle(a.D, b.D) > AngTol) return 0;
+        double s = (b.P - a.P).Dot(a.D.Normalized());
+        return Math.Abs(s) <= PosTol ? 0 : Math.Sign(s);
+    }
     private static bool IsLine(AsmGeo g) => g.Kind == 'l';
     private static bool IsAxis(AsmGeo g) => g.Kind is 'l' or 'a';
     private static bool IsPoint(AsmGeo g) => g.Kind == 'v';

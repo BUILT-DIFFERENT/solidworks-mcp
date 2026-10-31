@@ -63,25 +63,31 @@ public sealed class AssemblyTools(SwSession session)
         [Description("angle: limit mate maximum in degrees.")] double? maxDeg = null,
         [Description("gear: [a, b], e.g. tooth counts [20, 40].")] double[]? ratio = null,
         [Description("rack_pinion: rack travel per pinion turn in mm (π × pitch diameter).")] double? pitchMm = null,
+        [Description("distance between planes: outside (b in front of a's face) | inside; flip is chosen to match.")] string? side = null,
+        [Description("this (default; SOLIDWORKS may suppress it in other configurations) | all.")] string? configurations = null,
         [Description(KeepDesc)] bool keepOnFailure = false,
         [Description(DocDesc)] string? doc = null,
         CancellationToken cancellationToken = default) =>
         Output.Json(_svc.MateAddAsync(new AsmMateRequest
         {
+            Side = side, Configurations = configurations,
             Doc = doc, Type = type, A = a, B = b, C = c, D = d, Plane = plane, Alignment = alignment, Flip = flip, DistanceMm = distanceMm,
             AngleDeg = angleDeg, MinMm = minMm, MaxMm = maxMm, MinDeg = minDeg, MaxDeg = maxDeg, Ratio = ratio, PitchMm = pitchMm,
             KeepOnFailure = keepOnFailure,
         }, cancellationToken), progress, "asm_mate_add");
 
     [McpServerTool(Name = "asm_mate_list", Title = "List mates", ReadOnly = true, Destructive = false, Idempotent = true, OpenWorld = false)]
-    [Description("List the assembly's mates: name, type, alignment, entity kinds and components, distance/angle with its dimension " +
-                 "name (dimension_set drives it), error and suppressed state.")]
+    [Description("List the assembly's mates: name, type, alignment, entity kinds, components and the part features that made them, " +
+                 "distance/angle with its dimension name (dimension_set drives it), error and suppressed state. With feature: only the " +
+                 "mates on faces or edges that feature made, i.e. those an edit of it (e.g. a hole) can break.")]
     public Task<string> AsmMateList(
         [Description("Maximum mates to return.")] int limit = 100,
         [Description("Skip this many first.")] int offset = 0,
+        [Description("Only mates on geometry of this part feature, e.g. \"Hole1\".")] string? feature = null,
+        [Description("With feature: only on this component, e.g. \"plate-1\".")] string? component = null,
         [Description(DocDesc)] string? doc = null,
         CancellationToken cancellationToken = default) =>
-        Json(_svc.MateListAsync(doc, limit, offset, cancellationToken));
+        Json(_svc.MateListAsync(doc, limit, offset, feature, component, cancellationToken));
 
     [McpServerTool(Name = "asm_component_list", Title = "List components", ReadOnly = true, Destructive = false, Idempotent = true, OpenWorld = false)]
     [Description("List components: name, path, configuration, fixed, suppression (resolved | lightweight | suppressed), visible, " +
