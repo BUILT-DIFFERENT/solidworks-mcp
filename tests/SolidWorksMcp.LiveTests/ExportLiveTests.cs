@@ -767,14 +767,14 @@ public class ExportRequestTests
 public class HelpGuideTests
 {
     private static readonly string[] Constant =
-        [Guide.Conventions, Guide.EntityRef, Guide.WorkflowPlate, Guide.WorkflowEnclosure, Guide.Editing, Guide.Recovery];
+        [Guide.Conventions, Guide.EntityRef, Guide.WorkflowPlate, Guide.WorkflowEnclosure, Guide.Editing, Guide.DrawingEditing, Guide.Recovery];
 
     [Fact]
     public void Every_topic_renders_and_unknown_topics_are_refused()
     {
         var index = Guide.Get(null, "33.1.2");
         Assert.Equal("index", index.Topic);
-        Assert.Equal(7, index.Topics!.Count);
+        Assert.Equal(8, index.Topics!.Count);
         Assert.Contains("33.1.2", index.Text);
         foreach (var t in Guide.Topics)
         {

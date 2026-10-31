@@ -244,7 +244,9 @@ call. They come back in `warnings[]`.
   restarted server re-claims what it created.
 - **Undo.** `doc_undo` is allowed only when the document's update stamp still equals the one recorded after the server's
   last write, and only up to the number of server operations since then. Each mutating tool is wrapped in a named undo
-  object (to verify live).
+  object (to verify live). In drawings the sheet's (or active view's) sketch is always reported as active; it doesn't
+  block undo. A `vba_run` that changed an owned or adopted document is recorded as one named undo object and counts as
+  one server change; `drw_batch` is one undo object for all its steps (§7.3).
 
 ### 3.8 Entity references (selection model)
 ```jsonc
@@ -497,6 +499,9 @@ configuration), `asm_component_move`, `asm_interference` ([a, b, volumeMm3, cent
 `drw_view_section`, `drw_view_detail`, `drw_dimensions_auto` (count per view), `drw_dimension_add` (a batch, model-space
 refs, auto placement, visibility checked), `drw_note_add`, `drw_bom_add` (part or assembly view; anchors or [x, y]),
 `drw_balloons`, `drw_center_marks`, `drw_info` (sheet, border and title-block rectangles, views, annotation counts).
+Editing existing drawings (§7.3, 🧪): `drw_annotation_list`, `drw_dimension_set`, `drw_annotation_set`, `drw_delete`,
+`drw_view_set`, `drw_title_block`, `drw_hatch`, `drw_table_set`, `drw_check`, `drw_locate`, `drw_dimensions_arrange`,
+`drw_batch`; and `doc_standard` (documents) and `feature_hole_edit` (features).
 
 ### 4.11 Export (toolset `export`) — M1
 `model_export`: step (AP203/214/242), iges, parasolid, stl (binary or ascii, quality), 3mf, pdf/dwg/dxf (drawings, M4),
@@ -650,6 +655,7 @@ ergonomics. Each finding is verified before it is fixed.
 | **M5 Simulation** | `sim_static`, `sim_delete`. | Green against the oracle. |
 | **M6 Release** | README (safety, quickstart, clients, configuration, compatibility, troubleshooting, migration), CONTRIBUTING, SECURITY, THIRD-PARTY-NOTICES, the skill (written fresh), `install.ps1`, CI, the GitHub repository, tag v0.1.0. | A clean clone builds; CI is green; smoke tests pass. |
 | **M7 Breadth** | Done: `asm_pattern` (linear, circular, mirror, opposite-hand parts), `asm_mate_add` limit/symmetric/width/hinge/gear/rack mates, `asm_explode`, `face_edit` (delete and heal, offset, move; imported bodies too), `drw_annotation_add` (datums, surface finish, tolerance frames, balloons), `drw_table_add` (hole and revision tables), `weldment_member`, `sheetmetal_hem`, `sheetmetal_bend`, `sheetmetal_miter_flange`. Open: screw mates and jogs (unresolved in the API), more simulation types. New tools stay few (several kinds per tool) to keep the catalog small. | Each tool meets §6.6; all live tests green. |
+| **Drawing finishing** (§7.3) | 🧪 Editing existing drawings: annotation list/edit/delete, view moves, title blocks, hatches, tables, sheet check, coordinates, batches; doc_standard, feature_hole_edit; mate and undo fixes. | Live tests (`DrawingEditLiveTests`) green; the items of §7.3 marked ✅. |
 | **M8 Engineering projects** | Planned (§7.2, from the audit of 2026-10-24): tolerances and fits; production drawings (more sheets, flat-pattern, broken, auxiliary and broken-out views, cut-list tables, weld symbols); BOM as data and a one-call release package; fabrication data (cut lists, weldment trims, end caps, gussets, beads); simulation breadth (assemblies, contacts and connectors, more fixtures and loads, frequency, buckling, thermal, plots); section properties, costing, custom materials, Pack and Go, revision compare, a health report; standard hardware; top-down design; everyday modelling gaps. | Each work package meets §6.6 with live tests; all live tests and golden scenarios green, plus new scenarios for a toleranced drawing and a release package. |
 
 ### 7.1 Parallel work breakdown
@@ -828,6 +834,56 @@ and an exact oracle.
 **Resuming.** Start with WP1 and mark each package ✅ here as it lands. The verified recipes go into the API notes as
 usual. The add-in help can be extracted again with `hh.exe -decompile <folder> <file>.chm` after copying the `.chm` out
 of `Program Files` to a folder without spaces; the output never goes into the repository (§8).
+
+### 7.3 Finishing existing drawings (session report of 2026-10-31)
+**Why.** A user finished someone's partly done drawing (plus the part and assembly behind it) and did nearly all of it
+through `vba_run`: the server could add dimensions, notes and views but not change, move or delete anything already on
+a drawing. The report listed what the VBA did. This package builds it in, keeping the conventions: names from listings,
+sheet mm and model mm, every write read back, failures put back or rolled back, few new tools with several kinds each.
+
+**Status: 🧪 implemented, compile-checked against the 2024/2025 interop, not yet run live.** The pure logic has offline
+unit tests (`DrawingEditTests`: tolerances, precision, note escapes, property links, names, extents, the sheet check,
+stacking, clamping, outline moves, document options, option drift, mate side). `DrawingEditLiveTests` holds positive and
+negative live tests for the main paths; run them (and add the missing ones) before marking items ✅. The calls used are
+in the API notes §9a, marked UNVERIFIED until then.
+
+| Asked for | Where | Notes |
+|---|---|---|
+| List annotations per view (type, name, raw and evaluated text, position, leader attachment, dimension value) | `drw_annotation_list` | Also the box, leader ends, attachments in model mm, dangling, tolerance, precision. Current sheet only. |
+| Dimension prefix/suffix, tolerance (bilateral, limit, symmetric, none; also basic, min, max, fit), precision of value and tolerance, text position, parentheses | `drw_dimension_set` | A tolerance on a model dimension changes the model, which must be owned/adopted. |
+| Notes and tables: text, move, height, delete | `drw_annotation_set`, `drw_table_set`, `drw_delete` | |
+| Delete by name: annotation, view, detail circle, section line, sketch segment | `drw_delete` | Dry run first. |
+| Native chamfer dimension (chamfer edge + lead edge) | `drw_dimension_add {kind:"chamfer"}` | `IDrawingDoc.AddChamferDim`. |
+| Leader note attached to a model entity | `drw_note_add {attachTo}` | Picked at its sheet position, then `InsertNote`. |
+| Title-block fields: re-link to properties, set drawing properties, rewrite fields; one "fill from properties" call | `drw_title_block` | `values` writes each property where the format links it ($PRP drawing, $PRPSHEET model). Format notes are found by owner type, else while editing the format. |
+| Rewrite the general notes block | `drw_annotation_set {text}` | |
+| Move a view to a target centre or outline | `drw_view_set {centerMm \| boundsMm}` | Corrects from the outline read back (up to 4 passes). |
+| Rescale a view, switch its configuration, break alignment | `drw_view_set {scale, configuration, alignment}` | |
+| Section/detail views left a sketch open | fixed | Both close the view sketch and re-activate the sheet; a sketch still open is reported. |
+| Section: excluded components (also in subassemblies), auto hatch, which way it looks | `drw_view_section {excludeComponents, autoHatch, flip}` | `CreateSectionViewAt5` options; `IDrSection.SetAutoHatch`. |
+| Detail: radius in model units, label; label placement | `drw_view_detail {radiusModelMm, label, labelAtMm}` | The detail circle's label; view labels ("SECTION A-A") are not placed yet. |
+| Parent model point for section/detail | `throughModelMm`, `centerModelMm` | Through the view's model-to-sheet transform. |
+| Hatches per component: pattern, angle, scale, follow material | `drw_hatch` | `IView.GetFaceHatches`. |
+| BOM: reorder rows, add or move columns, widths, row and text height, type into cells, link a column to a property, reposition | `drw_table_set` | Works for any table; property links for BOMs. |
+| Hole Wizard: edit type, countersink, depth by name | `feature_hole_edit` | `ModifyDefinition` keeps the feature (mates stay); names, not type numbers. |
+| Drafting standard: load/save `.sldstd`, named options (leading zeros, alignment, decimals, arrows) | `doc_standard` | Plus `compareWith`: every document option that differs from another document (the 1,200-option comparison). |
+| Undo blocked in drawings; undo after VBA | `doc_undo` | §3.7. |
+| `computer_open_application` launched a second SOLIDWORKS | not this server | That is the MCP client's computer-use tool. This server never launches a second instance (§3.3); `sw_connect` attaches. |
+| Opening documents reset system double 2 | `PrefAudit` | SOLIDWORKS recomputes the STL deviation; the user's value is put back, except under a coarse/fine STL preset where SOLIDWORKS derives it (writing it would switch the preset to custom). |
+| Escaped `\n` in notes | `drw_note_add`, `drw_annotation_set` | `\n` is a line break, `\\n` a literal. |
+| Dimension text above the sheet border | `drw_dimension_add` | The default spot is clamped into the frame; a box outside it is reported. |
+| Mates: all configurations; which side; which mates an edit breaks | `asm_mate_add {configurations, side}`, `asm_mate_list {feature}` | `side` re-makes the mate flipped once if needed; the list shows each entity's owning feature. |
+| Sheet check: overlaps, outside the frame, unattached, deleted geometry, duplicates, missing Ø | `drw_check` | Boxes are approximate (text widths estimated). "Missing Ø" is a heuristic: a linear value equal to a cylinder diameter. |
+| Zoomed screenshot of a sheet region | `view_screenshot {regionMm}` | High-resolution PNG/PDF of a region: not yet (the PDF export covers whole sheets). |
+| Coordinates model ↔ sheet, edge under a sheet point, hit test | `drw_locate` | Edges for part views; assembly views give the view and annotations only. |
+| Baseline / ordinate sets from one datum | `drw_dimension_add {kind:"baseline" \| "chain"}` | Ordinate dimensions: not yet (`AddOrdinateDimension2`'s selection order to settle live). |
+| Automatic balloons with a choice of components and placement | `drw_annotation_add {kind:"balloon", components, layout}` | |
+| Stack dimensions without overlap on one side | `drw_dimensions_arrange` | |
+| Centerlines and center marks for chosen features (port axis in a section) | `drw_center_marks {at, kind}` | |
+| A batch under one undo step; dry run / preview | `drw_batch {steps, dryRun}`; `dryRun` on `drw_view_set`, `drw_delete`, `drw_dimensions_arrange` | A batch's dry run runs the steps and undoes them. |
+
+**Open.** Ordinate dimensions, view-label placement, region exports at a chosen resolution, the edges of assembly views
+in `drw_locate`, sheets other than the current one in the listing tools, and the live runs.
 
 ---
 

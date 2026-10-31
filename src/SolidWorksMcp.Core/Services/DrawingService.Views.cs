@@ -42,6 +42,14 @@ public sealed partial class DrawingService
 
     public Task<DrwViewSetResult> ViewSetAsync(DrwViewSetRequest q, CancellationToken ct = default)
     {
+        var (scale, sheetScale, align) = ViewSetPlan(q);
+        return session.RunAsync("drw_view_set", ctx => ViewSet(ctx, q, scale, sheetScale, align),
+            (q.DryRun ? RunOptions.Read(q.Doc) : RunOptions.Write(q.Doc)) with { Timeout = Longer(session, 90) }, ct);
+    }
+
+    /// <summary>drw_view_set's arguments checked and resolved: a fixed scale or the sheet's, and the alignment wanted.</summary>
+    private static (double? Scale, bool SheetScale, string? Align) ViewSetPlan(DrwViewSetRequest q)
+    {
         if (q.CenterMm is null && q.BoundsMm is null && q.Scale is null && q.Configuration is null && q.Alignment is null && q.Locked is null)
             throw SwException.InvalidArgument("Nothing to change.", "Pass centerMm or boundsMm (move), scale, configuration, alignment and/or locked.");
         if (q.CenterMm is not null && q.BoundsMm is not null) throw SwException.InvalidArgument("Pass centerMm or boundsMm, not both.");
@@ -70,8 +78,7 @@ public sealed partial class DrawingService
         };
         if (align is "horizontal" or "vertical" && string.IsNullOrWhiteSpace(q.AlignWith))
             throw SwException.InvalidArgument($"alignment '{align}' needs 'alignWith': the view to align to.");
-        return session.RunAsync("drw_view_set", ctx => ViewSet(ctx, q, scale, sheetScale, align),
-            (q.DryRun ? RunOptions.Read(q.Doc) : RunOptions.Write(q.Doc)) with { Timeout = Longer(session, 90) }, ct);
+        return (scale, sheetScale, align);
     }
 
     private static DrwViewSetResult ViewSet(SwContext ctx, DrwViewSetRequest q, double? scale, bool sheetScale, string? align)

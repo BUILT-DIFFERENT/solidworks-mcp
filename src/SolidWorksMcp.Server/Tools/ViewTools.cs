@@ -16,7 +16,7 @@ public sealed class ViewTools(SwSession session)
     [McpServerTool(Name = "view_screenshot", Title = "Screenshot", ReadOnly = true, Destructive = false, Idempotent = true, OpenWorld = false)]
     [Description("Screenshot (inline PNG image) of the target document in a standard view, zoomed to fit, planes hidden. The user's view, " +
                  "display mode, visibility settings, selection and active window are restored afterwards. Use it to check shape and " +
-                 "orientation after modeling steps.")]
+                 "orientation after modeling steps. Drawings: regionMm zooms to a sheet rectangle (check one corner of a sheet).")]
     public async Task<CallToolResult> ViewScreenshot(
         [Description("iso | front | back | left | right | top | bottom | trimetric | dimetric | current")] string view = "iso",
         [Description("Zoom to fit the model.")] bool zoomToFit = true,
@@ -26,10 +26,11 @@ public sealed class ViewTools(SwSession session)
         [Description("Longest image edge in pixels (64-2048).")] int maxSizePx = 1024,
         [Description("Also save the PNG to this file (relative paths go under Documents\\solidworks-mcp).")] string? file = null,
         [Description("Replace an existing file.")] bool overwrite = false,
+        [Description("Drawings: sheet rectangle [xMin,yMin,xMax,yMax] mm to zoom to.")] double[]? regionMm = null,
         [Description("Document (handle, title or path); default: the target document.")] string? doc = null,
         CancellationToken cancellationToken = default)
     {
-        var r = await _svc.ScreenshotAsync(doc, view, zoomToFit, displayMode, hidePlanes, hideSketches, maxSizePx, file, overwrite, cancellationToken);
+        var r = await _svc.ScreenshotAsync(doc, view, zoomToFit, displayMode, hidePlanes, hideSketches, maxSizePx, file, overwrite, regionMm, cancellationToken);
         return new CallToolResult
         {
             Content =

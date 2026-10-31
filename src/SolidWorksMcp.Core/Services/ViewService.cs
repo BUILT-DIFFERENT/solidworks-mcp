@@ -1,6 +1,7 @@
 using SolidWorks.Interop.sldworks;
 using SolidWorks.Interop.swconst;
 using SolidWorksMcp.Core.Com;
+using SolidWorksMcp.Core.Geometry;
 using SolidWorksMcp.Core.Documents;
 using SolidWorksMcp.Core.Imaging;
 using SolidWorksMcp.Core.Model;
@@ -49,9 +50,23 @@ public sealed class ViewService(SwSession session)
 
     public Task<ScreenshotResult> ScreenshotAsync(string? doc, string view, bool zoomToFit, string displayMode, bool hidePlanes,
         bool hideSketches, int maxEdgePx, string? file, bool overwrite, CancellationToken ct = default) =>
-        session.RunAsync("view_screenshot", ctx =>
+        ScreenshotAsync(doc, view, zoomToFit, displayMode, hidePlanes, hideSketches, maxEdgePx, file, overwrite, null, ct);
+
+    /// <summary>
+    /// view_screenshot; with <paramref name="regionMm"/> (drawings) the window zooms to that sheet rectangle
+    /// [xMin, yMin, xMax, yMax] mm (IModelDoc2.ViewZoomTo2 in sheet meters) instead of a named view.
+    /// </summary>
+    public Task<ScreenshotResult> ScreenshotAsync(string? doc, string view, bool zoomToFit, string displayMode, bool hidePlanes,
+        bool hideSketches, int maxEdgePx, string? file, bool overwrite, double[]? regionMm, CancellationToken ct = default)
+    {
+        if (regionMm is not null && (regionMm.Length != 4 || regionMm.Any(x => !double.IsFinite(x)) || regionMm[2] - regionMm[0] < 1 || regionMm[3] - regionMm[1] < 1))
+            throw SwException.InvalidArgument("'regionMm' must be [xMin, yMin, xMax, yMax] in sheet mm, at least 1 mm each way.");
+        return session.RunAsync("view_screenshot", ctx =>
         {
-            string v = (view ?? "iso").Trim().ToLowerInvariant();
+            if (regionMm is not null && ctx.Doc.GetType() != (int)swDocumentTypes_e.swDocDRAWING)
+                throw SwException.InvalidArgument("'regionMm' is a sheet rectangle: it works on drawings.");
+            string v = regionMm is not null ? "current" : (view ?? "iso").Trim().ToLowerInvariant();
+            if (regionMm is not null) zoomToFit = false;
             if (v != "current" && !Views.ContainsKey(v))
                 throw SwException.InvalidArgument($"Unknown view '{view}'.", "Use current, iso, front, back, left, right, top, bottom, trimetric or dimetric.");
             string mode = (displayMode ?? "shaded_edges").Trim().ToLowerInvariant();
@@ -94,6 +109,7 @@ public sealed class ViewService(SwSession session)
                 if (mode != "current") mv.DisplayMode = Modes[mode];
                 if (v != "current") d.ShowNamedView2("", Views[v]);
                 if (zoomToFit) d.ViewZoomtofit2();
+                if (regionMm is { } r) d.ViewZoomTo2(Units.M(r[0]), Units.M(r[1]), 0, Units.M(r[2]), Units.M(r[3]), 0);
                 d.GraphicsRedraw2();
                 if (!d.SaveBMP(tmp, 0, 0) || !File.Exists(tmp))
                     throw new SwException(ErrorCodes.IoError, "SOLIDWORKS could not render the view (SaveBMP failed).",
@@ -118,7 +134,7 @@ public sealed class ViewService(SwSession session)
                     if (hidePlanes && planes) d.Extension.SetUserPreferenceToggle((int)swUserPreferenceToggle_e.swDisplayPlanes, 0, true);
                     if (hideSketches && sketches) d.Extension.SetUserPreferenceToggle((int)swUserPreferenceToggle_e.swDisplaySketches, 0, true);
                     if (mode != "current") mv.DisplayMode = oldMode;
-                    if (v != "current" || zoomToFit)
+                    if (v != "current" || zoomToFit || regionMm is not null)
                     {
                         if (orientation is not null) mv.Orientation3 = orientation;
                         if (translation is not null) mv.Translation3 = translation;
@@ -135,4 +151,5 @@ public sealed class ViewService(SwSession session)
                 catch (Exception ex) { ctx.Warn($"Could not fully restore the view: {ex.Message}"); }
             }
         }, RunOptions.Read(doc), ct);
+    }
 }

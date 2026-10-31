@@ -26,6 +26,10 @@ public sealed record DrwAnnotationRequest
     public bool Diameter { get; init; }
     public string? Material { get; init; }
     public IReadOnlyList<string>? Datums { get; init; }
+    /// <summary>balloon without 'at': only these components (default: every component).</summary>
+    public IReadOnlyList<string>? Components { get; init; }
+    /// <summary>balloon without 'at': square | circle | top | bottom | left | right (where they go around the view).</summary>
+    public string? Layout { get; init; }
 }
 
 public sealed class DrwAnnotationResult : ToolResult
@@ -71,6 +75,11 @@ public sealed partial class DrawingService
             throw SwException.InvalidArgument($"kind '{kind}' needs 'at': the edge it points to, e.g. {{type:'edge', at:[x,y,z]}} (model mm).");
         if (kind == "balloon" && q.At is null && q.AtMm is not null)
             throw SwException.InvalidArgument("Balloons for the whole view (no 'at') are laid out by SOLIDWORKS; 'atMm' needs 'at'.");
+        Only("components", q.Components is { Count: > 0 }, "balloon");
+        Only("layout", q.Layout is not null, "balloon");
+        if ((q.Components is { Count: > 0 } || q.Layout is not null) && q.At is not null)
+            throw SwException.InvalidArgument("'components' and 'layout' are for the balloons of a whole view (leave 'at' out).");
+        BalloonLayout(q.Layout);
         if (q.AtMm is not null) Sheet2(q.AtMm, "atMm");
 
         AnnotationPlan plan;
@@ -119,7 +128,8 @@ public sealed partial class DrawingService
             r = EntityResolver.Resolve(ctx, model, q.At, "at", EntityKind.Edge, EntityKind.Vertex);
             g = Seen(r, t, part, "at");
         }
-        if (plan.Kind == "balloon" && r is null) return AutoBalloons(ctx, d, drw, hit);
+        if (plan.Kind == "balloon" && r is null)
+            return q.Components is { Count: > 0 } cs ? ComponentBalloons(ctx, d, drw, hit, cs, q.Layout) : AutoBalloons(ctx, d, drw, hit, q.Layout);
         var outline = Outline(hit);
         var taken = hit.View.DrwAnnotations().Select(a => a.DrwPosition()).Where(p => p.Length >= 2).Select(p => (p[0] * 1000, p[1] * 1000)).ToList();
         var spot = q.AtMm is not null ? Sheet2(q.AtMm, "atMm") : DrawingLayout.AnnotationSpot(outline, g is null ? null : (g.Pick.X * 1000, g.Pick.Y * 1000), taken);
@@ -252,11 +262,11 @@ public sealed partial class DrawingService
     /// Balloons for every component in the view (IDrawingDoc.AutoBalloon5 on the selected view, one per part, square
     /// layout). Verified: new BOM balloons with distinct item numbers.
     /// </summary>
-    private static DrwAnnotationResult AutoBalloons(SwContext ctx, IModelDoc2 d, IDrawingDoc drw, ViewHit hit)
+    private static DrwAnnotationResult AutoBalloons(SwContext ctx, IModelDoc2 d, IDrawingDoc drw, ViewHit hit, string? layout = null)
     {
         int before = hit.View.DrwNotes().Count(n => Safe(() => n.IsBomBalloon(), false));
         var opt = drw.CreateAutoBalloonOptions();
-        opt.Layout = (int)swBalloonLayoutType_e.swDetailingBalloonLayout_Square;
+        opt.Layout = BalloonLayout(layout);
         opt.IgnoreMultiple = true;
         opt.InsertMagneticLine = false;
         opt.Style = (int)swBalloonStyle_e.swBS_Circular;
@@ -288,6 +298,89 @@ public sealed partial class DrawingService
             AttachedTo = made.Sum(n => Safe(() => n.DrwAnnotation()?.GetAttachedEntityCount3() ?? 0, 0)),
             Count = made.Count,
             Checks = checks,
+        };
+    }
+
+    /// <summary>swBalloonLayoutType_e for a layout name (default square).</summary>
+    private static int BalloonLayout(string? layout) => DrawingLayout.Norm(layout) switch
+    {
+        null or "square" => (int)swBalloonLayoutType_e.swDetailingBalloonLayout_Square,
+        "circle" or "circular" => (int)swBalloonLayoutType_e.swDetailingBalloonLayout_Circle,
+        "top" or "above" => (int)swBalloonLayoutType_e.swDetailingBalloonLayout_Top,
+        "bottom" or "below" => (int)swBalloonLayoutType_e.swDetailingBalloonLayout_Bottom,
+        "left" => (int)swBalloonLayoutType_e.swDetailingBalloonLayout_Left,
+        "right" => (int)swBalloonLayoutType_e.swDetailingBalloonLayout_Right,
+        _ => throw SwException.InvalidArgument($"Unknown layout '{layout}'.", "Use square, circle, top, bottom, left or right."),
+    };
+
+    /// <summary>
+    /// Balloons for chosen components only: each on a visible edge of that component in the view
+    /// (IView.GetVisibleEntities2, selected through the view, then InsertBOMBalloon2), set out evenly along one side of
+    /// the view (layout top | bottom | left | right; default top). Verified: one attached BOM balloon per component.
+    /// </summary>
+    private static DrwAnnotationResult ComponentBalloons(SwContext ctx, IModelDoc2 d, IDrawingDoc drw, ViewHit hit, IReadOnlyList<string> names, string? layout)
+    {
+        string side = DrawingLayout.Norm(layout) switch
+        {
+            null or "top" or "above" or "square" => "top",
+            "bottom" or "below" => "bottom",
+            "left" => "left",
+            "right" => "right",
+            _ => throw SwException.InvalidArgument($"Balloons for chosen components go top, bottom, left or right (got '{layout}')."),
+        };
+        var visible = ComArgs.Objects<IComponent2>(Safe(() => (object?)hit.View.GetVisibleComponents(), null));
+        if (visible.Count == 0) throw SwException.InvalidArgument($"'{hit.Name}' shows no components (balloons for chosen components need an assembly view).");
+        var comps = names.Select((n, i) => visible.FirstOrDefault(c => Matches(c.Name2, n))
+                                          ?? throw new SwException(ErrorCodes.EntityNotFound, $"components[{i}]: '{n}' is not visible in '{hit.Name}'.",
+                                              $"Visible: {string.Join(", ", visible.Take(12).Select(c => c.Name2))}.")).ToList();
+        var outline = Outline(hit);
+        Activate(drw, hit);
+        var made = new List<INote>();
+        var checks = new List<string>();
+        try
+        {
+            for (int i = 0; i < comps.Count; i++)
+            {
+                var c = comps[i];
+                var edge = ComArgs.Objects<object>(Safe(() => (object?)hit.View.GetVisibleEntities2((Component2)(object)c, (int)swViewEntityType_e.swViewEntityType_Edge), null)).FirstOrDefault()
+                           ?? throw new SwException(ErrorCodes.EntityNotFound, $"'{c.Name2}' shows no edge in '{hit.Name}' to attach a balloon to.");
+                d.ClearSelection2(true);
+                if (!hit.View.SelectEntity(edge, false)) throw new SwException(ErrorCodes.FeatureFailed, $"Could not select an edge of '{c.Name2}'.");
+                var opt = d.Extension.CreateBalloonOptions();
+                opt.Style = (int)swBalloonStyle_e.swBS_Circular;
+                opt.Size = (int)swBalloonFit_e.swBF_2Chars;
+                opt.UpperTextContent = (int)swBalloonTextContent_e.swBalloonTextItemNumber;
+                var note = d.Extension.InsertBOMBalloon2(opt) ?? throw new SwException(ErrorCodes.FeatureFailed, $"SOLIDWORKS made no balloon on '{c.Name2}'.");
+                d.ClearSelection2(true);
+                made.Add(note);
+                double f = (i + 1.0) / (comps.Count + 1);
+                var (x, y) = side switch
+                {
+                    "top" => (outline.X0 + f * outline.W, outline.Y1 + 12),
+                    "bottom" => (outline.X0 + f * outline.W, outline.Y0 - 12),
+                    "left" => (outline.X0 - 12, outline.Y1 - f * outline.H),
+                    _ => (outline.X1 + 12, outline.Y1 - f * outline.H),
+                };
+                note.DrwAnnotation()?.SetPosition2(Units.M(x), Units.M(y), 0);
+                if (Safe(() => note.DrwAnnotation()?.GetAttachedEntityCount3() ?? 0, 0) < 1)
+                    throw new SwException(ErrorCodes.VerifyFailed, $"The balloon of '{c.Name2}' is not attached to it.");
+            }
+        }
+        catch (Exception ex) when (ex is SwException or COMException && !ComArgs.IsDisconnect(ex))
+        {
+            d.ClearSelection2(true);
+            int removed = made.Count(n => n.DrwAnnotation() is IAnnotation an && DeleteAnnotation(d, an));
+            if (ex is SwException se) throw new SwException(se.Code, $"{se.Message} Removed {removed} balloon(s) this call had made.", se.Hint, se);
+            throw new SwException(ErrorCodes.FeatureFailed, $"drw_annotation_add: {ex.Message} Removed {removed} balloon(s).", null, ex);
+        }
+        var texts = made.Select(n => (n.GetBomBalloonText(true) is { Length: > 0 } up ? up : n.GetText()) ?? "").ToList();
+        checks.Add($"{made.Count} balloon(s) attached to {string.Join(", ", comps.Select(c => c.Name2))}, set out on the {side}");
+        if (made.Any(n => !Safe(() => n.IsBomBalloon(), false))) ctx.Warn("Some balloons are not linked to a BOM item (no BOM in the drawing?).");
+        d.GraphicsRedraw2();
+        return new DrwAnnotationResult
+        {
+            Doc = ctx.Title(d), View = hit.Name, Kind = "balloon", Annotation = string.Join(", ", made.Select(n => n.GetName() ?? "")),
+            Text = string.Join(", ", texts), AttachedTo = made.Count, Count = made.Count, Checks = checks,
         };
     }
 

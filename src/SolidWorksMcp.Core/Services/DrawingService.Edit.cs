@@ -719,14 +719,17 @@ public sealed partial class DrawingService
         catch (COMException e) when (!ComArgs.IsDisconnect(e)) { /* informational */ }
     }
 
-    /// <summary>The drawing frame: the area inside the sheet format's border (DrawingLayout.Usable), else the sheet less 10 mm.</summary>
+    /// <summary>
+    /// The drawing frame (sheet mm): the border DrawingLayout.Usable assumes (10 mm margins, 20 mm on the left with a sheet
+    /// format), including the title-block band, since annotations may sit beside the title block.
+    /// </summary>
     private static SheetRect Frame(ISheet sheet)
     {
         var sp = sheet.DrwProps();
         if (sp.Length < 7) return new SheetRect(-1e5, -1e5, 1e5, 1e5);
         bool hasFormat = (int)Math.Round(sp[1]) != TemplateNone && !string.IsNullOrEmpty(sheet.GetTemplateName());
         var u = DrawingLayout.Usable(sp[5] * 1000, sp[6] * 1000, hasFormat);
-        return hasFormat ? new SheetRect(u.X0, Math.Max(10, u.Y0 - 60), u.X1, u.Y1) : new SheetRect(u.X0, u.Y0, u.X1, u.Y1);
+        return new SheetRect(u.X0, 10, u.X1, u.Y1);
     }
 
     // ================================================================== drw_annotation_set

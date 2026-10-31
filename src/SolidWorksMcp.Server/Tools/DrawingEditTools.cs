@@ -142,4 +142,56 @@ public sealed class DrawingEditTools(SwSession session)
             Doc = doc, Table = table, Cells = cells, ColumnWidthsMm = columnWidthsMm, RowHeightMm = rowHeightMm, TextHeightMm = textHeightMm,
             MoveRow = moveRow, MoveColumn = moveColumn, InsertColumn = insertColumn, InsertColumnAt = insertColumnAt, ColumnProperty = columnProperty, AtMm = atMm,
         }, cancellationToken));
+
+    [McpServerTool(Name = "drw_check", Title = "Check drawing sheet", ReadOnly = true, Destructive = false, Idempotent = true, OpenWorld = false)]
+    [Description("Sheet check / drawing review of the current sheet: annotations that overlap each other, sit outside the drawing frame, " +
+                 "are attached to nothing or to deleted geometry (dangling), duplicate dimensions, linear dimensions equal to a cylinder " +
+                 "diameter without Ø, and views that overlap or leave the frame. Boxes are approximate (text widths estimated).")]
+    public async Task<string> DrwCheck(
+        [Description("Maximum issues to return.")] int limit = 100,
+        [Description(DocDesc)] string? doc = null,
+        CancellationToken cancellationToken = default) =>
+        ResultJson.Serialize(await _svc.CheckAsync(limit, doc, cancellationToken));
+
+    [McpServerTool(Name = "drw_locate", Title = "Drawing coordinates and hit test", ReadOnly = true, Destructive = false, Idempotent = true, OpenWorld = false)]
+    [Description("Coordinates between model and sheet: modelMm → its sheet point in a view; sheetMm → the view and annotations there, " +
+                 "the model point under it (on the plane through the model's centre) and the nearest visible model edges (part views), " +
+                 "each with an at:[…] model point that the other tools accept.")]
+    public async Task<string> DrwLocate(
+        [Description("View; default with sheetMm: the smallest view containing the point.")] string? view = null,
+        [Description("A sheet point [x,y] mm.")] double[]? sheetMm = null,
+        [Description("A model point [x,y,z] mm (needs view).")] double[]? modelMm = null,
+        [Description("How many nearest edges to return (0-20).")] int edges = 3,
+        [Description(DocDesc)] string? doc = null,
+        CancellationToken cancellationToken = default) =>
+        ResultJson.Serialize(await _svc.LocateAsync(view, sheetMm, modelMm, edges, doc, cancellationToken));
+
+    [McpServerTool(Name = "drw_dimensions_arrange", Title = "Stack dimensions", ReadOnly = false, Destructive = false, Idempotent = true, OpenWorld = false)]
+    [Description("Stack dimensions on one side of a view without overlap: rows offsetMm outside the view, then every spacingMm, smallest " +
+                 "value nearest the view, each keeping its place along the side. Default: the view's dimensions already on that side. " +
+                 "dryRun returns the planned positions. Verified: positions read back, no overlapping text.")]
+    public async Task<string> DrwDimensionsArrange(
+        [Description("View name.")] string view,
+        [Description("above | below | left | right")] string side,
+        [Description("Dimension names (drw_annotation_list); default: those on that side.")] string[]? dimensions = null,
+        [Description("Distance between rows in mm.")] double spacingMm = 7,
+        [Description("First row's distance from the view in mm.")] double offsetMm = 10,
+        [Description("Report the plan only.")] bool dryRun = false,
+        [Description(DocDesc)] string? doc = null,
+        CancellationToken cancellationToken = default) =>
+        ResultJson.Serialize(await _svc.ArrangeAsync(new DrwArrangeRequest
+        {
+            Doc = doc, View = view, Side = side, Dimensions = dimensions, SpacingMm = spacingMm, OffsetMm = offsetMm, DryRun = dryRun,
+        }, cancellationToken));
+
+    [McpServerTool(Name = "drw_batch", Title = "Batch drawing edits", ReadOnly = false, Destructive = true, Idempotent = false, OpenWorld = false)]
+    [Description("Run several drawing edits in one call as one undo step: steps [{op, args}] with op dimension_set, annotation_set, " +
+                 "delete, view_set, table_set or dimensions_arrange and args as that drw_ tool takes them. Each step verifies as its tool " +
+                 "does; a failing step undoes the whole batch. dryRun runs and checks every step, then undoes them (a preview).")]
+    public async Task<string> DrwBatch(
+        [Description("[{op:'dimension_set', args:{name:'RD1@Drawing View1', prefix:'Ø'}}, …]")] DrwBatchStep[] steps,
+        [Description("Run, report and undo.")] bool dryRun = false,
+        [Description(DocDesc)] string? doc = null,
+        CancellationToken cancellationToken = default) =>
+        ResultJson.Serialize(await _svc.BatchAsync(steps, dryRun, doc, cancellationToken));
 }

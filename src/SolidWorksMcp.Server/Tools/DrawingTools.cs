@@ -149,18 +149,31 @@ public sealed class DrawingTools(SwSession session)
 
     [McpServerTool(Name = "drw_dimension_add", Title = "Drawing dimension", ReadOnly = false, Destructive = false, Idempotent = false, OpenWorld = false)]
     [Description("Dimension edges or vertices of the view's model in a drawing view (a reference dimension): linear, horizontal, vertical, " +
-                 "radial, diameter, angular, or chamfer (a: the chamfer edge, b: the lead-in edge). References are in model mm, e.g. " +
+                 "radial, diameter, angular, chamfer (a: the chamfer edge, b: the lead-in edge), or a baseline / chain set (a: the datum, " +
+                 "targets, direction, side: stacked without overlap). References are in model mm, e.g. " +
                  "a:{type:'edge',at:[0,30,20]}. Verified: the value SOLIDWORKS reads equals the geometry (chamfer: the dimension type), " +
                  "otherwise removed; the default text spot is kept inside the drawing frame. Edit it afterwards with drw_dimension_set.")]
     public async Task<string> DrwDimensionAdd(
         [Description("View name (drw_info lists views).")] string view,
         [Description("Edge or vertex of the view's model.")] EntityRef a,
         [Description("Second edge or vertex (distance or angle; chamfer: the lead-in edge).")] EntityRef? b = null,
-        [Description("linear | horizontal | vertical | radial | diameter | angular | chamfer")] string kind = "linear",
+        [Description("linear | horizontal | vertical | radial | diameter | angular | chamfer | baseline | chain")] string kind = "linear",
         [Description("Dimension text [x,y] sheet mm; default: beside the view.")] double[]? textAtMm = null,
+        [Description("kind baseline | chain: the edges/vertices to dimension, from datum 'a' (baseline) or each from the previous (chain).")] EntityRef[]? targets = null,
+        [Description("baseline/chain: horizontal | vertical distances.")] string? direction = null,
+        [Description("baseline/chain: above | below (horizontal), left | right (vertical).")] string? side = null,
+        [Description("baseline/chain: row spacing in mm.")] double spacingMm = 7,
         [Description(DocDesc)] string? doc = null,
         CancellationToken cancellationToken = default) =>
-        ResultJson.Serialize(await _svc.DimensionAddAsync(view, a, b, kind, textAtMm, doc, cancellationToken));
+        DrawingLayoutNorm(kind) is "baseline" or "chain"
+            ? b is not null || textAtMm is not null
+                ? throw SwException.InvalidArgument("A baseline or chain set takes the datum as 'a' and the rest as 'targets' (no 'b' or 'textAtMm').")
+                : ResultJson.Serialize(await _svc.DimensionSetAddAsync(view, a, targets, kind, direction, side, spacingMm, doc, cancellationToken))
+            : targets is not null || direction is not null || side is not null
+                ? throw SwException.InvalidArgument("targets, direction and side go with kind baseline or chain.")
+                : ResultJson.Serialize(await _svc.DimensionAddAsync(view, a, b, kind, textAtMm, doc, cancellationToken));
+
+    private static string? DrawingLayoutNorm(string? s) => string.IsNullOrWhiteSpace(s) ? null : s.Trim().ToLowerInvariant();
 
     [McpServerTool(Name = "drw_note_add", Title = "Drawing note", ReadOnly = false, Destructive = false, Idempotent = false, OpenWorld = false)]
     [Description("Note / text on the sheet, or in a view (it then moves with the view), at [x,y] sheet mm; a line break (or the escape \\n) " +
@@ -179,7 +192,7 @@ public sealed class DrawingTools(SwSession session)
     [McpServerTool(Name = "drw_annotation_add", Title = "Drawing annotation", ReadOnly = false, Destructive = false, Idempotent = false, OpenWorld = false)]
     [Description("GD&T and symbols in a view, on an edge of the view's model (model mm): datum feature (label), surface finish " +
                  "(roughness Ra), geometric tolerance frame (characteristic, tolerance, Ø, MMC/LMC, datums) or a BOM balloon (without " +
-                 "'at': balloons for every component). Verified: label, roughness, frame or balloon text and the attachment read back; otherwise removed.")]
+                 "'at': balloons for every component, or for the components listed, laid out on one side). Verified: label, roughness, frame or balloon text and the attachment read back; otherwise removed.")]
     public async Task<string> DrwAnnotationAdd(
         [Description("datum | surface_finish | gtol | balloon")] string kind,
         [Description("View name (drw_info lists views).")] string view,
@@ -193,12 +206,15 @@ public sealed class DrawingTools(SwSession session)
         [Description("gtol: a diameter (Ø) tolerance zone.")] bool diameter = false,
         [Description("gtol: none (default) | mmc | lmc")] string? material = null,
         [Description("gtol: datum letters, e.g. [\"A\",\"B\"].")] string[]? datums = null,
+        [Description("balloon without at: only these components, e.g. [\"bolt-1\"].")] string[]? components = null,
+        [Description("balloon without at: square | circle | top | bottom | left | right.")] string? layout = null,
         [Description(DocDesc)] string? doc = null,
         CancellationToken cancellationToken = default) =>
         ResultJson.Serialize(await _svc.AnnotationAddAsync(new DrwAnnotationRequest
         {
             Doc = doc, Kind = kind, View = view, At = at, AtMm = atMm, Label = label, Roughness = roughness, Finish = finish,
             Characteristic = characteristic, Tolerance = tolerance, Diameter = diameter, Material = material, Datums = datums,
+            Components = components, Layout = layout,
         }, cancellationToken));
 
     [McpServerTool(Name = "drw_table_add", Title = "Hole or revision table", ReadOnly = false, Destructive = false, Idempotent = false, OpenWorld = false)]
@@ -233,14 +249,19 @@ public sealed class DrawingTools(SwSession session)
         Output.Json(_svc.BomAddAsync(view, atMm, template, doc, cancellationToken), progress, "drw_bom_add");
 
     [McpServerTool(Name = "drw_center_marks", Title = "Center marks", ReadOnly = false, Destructive = false, Idempotent = false, OpenWorld = false)]
-    [Description("Center marks on the holes seen face-on in drawing views. Returns the center marks added per view, counted before and " +
+    [Description("Center marks on the holes seen face-on in drawing views, or center marks / centerlines on chosen edges and faces (at). Returns the center marks added per view, counted before and " +
                  "after; none comes with a hint why.")]
     public Task<string> DrwCenterMarks(
         IProgress<ProgressNotificationValue> progress,
-        [Description("View names; default: the views of the current sheet.")] string[]? views = null,
+        [Description("View names; default: the views of the current sheet (with at: one view).")] string[]? views = null,
+        [Description("Only on these entities of the view's model (model mm): circular edges (center_mark) or round faces (centerline).")] EntityRef[]? at = null,
+        [Description("With at: center_mark | centerline (e.g. a port's axis in a section view).")] string? kind = null,
         [Description(DocDesc)] string? doc = null,
         CancellationToken cancellationToken = default) =>
-        Output.Json(_svc.CenterMarksAsync(views, doc, cancellationToken), progress, "drw_center_marks");
+        at is { Length: > 0 }
+            ? Output.Json(_svc.CenterMarksAtAsync(views is { Length: 1 } ? views[0] : throw SwException.InvalidArgument("'at' needs exactly one view in 'views'."), at, kind, doc, cancellationToken), progress, "drw_center_marks")
+            : kind is not null ? throw SwException.InvalidArgument("'kind' goes with 'at'.")
+            : Output.Json(_svc.CenterMarksAsync(views, doc, cancellationToken), progress, "drw_center_marks");
 
     [McpServerTool(Name = "drw_info", Title = "Drawing info", ReadOnly = true, Destructive = false, Idempotent = true, OpenWorld = false)]
     [Description("Drawing overview: sheets (size, scale, projection, format) and their views (name, type, orientation, scale, centerMm, " +

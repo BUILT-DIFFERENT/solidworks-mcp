@@ -144,8 +144,29 @@ with `segments:["Line5",…], corner:"none"`. The result lists each member's bod
    view). Each is placed beside its edge unless you pass `atMm`. Tables: `drw_table_add {kind:"hole", view}` (X/Y of every
    hole from the face's lower-left corner, or from `origin`) and `{kind:"revision", revisions:["First release"]}`.
 5. Add `drw_view_section`, `drw_view_detail`, `drw_note_add`, and `drw_bom_add` for assemblies. `drw_info` lists the
-   views with their positions.
+   views with their positions. Sections and details can be placed from the model: `drw_view_section {parent,
+   throughModelMm:[x,y,z], orientation:"vertical", excludeComponents:["bolt-1"]}`, `drw_view_detail {parent,
+   centerModelMm:[…], radiusModelMm:8}`. A leader note: `drw_note_add {text, atMm, view, attachTo:{type:"edge", at:[…]}}`.
 6. `model_export {path:"bracket.pdf"}` (or .dwg/.dxf).
+
+**Finishing an existing drawing (editing, no VBA).**
+1. `drw_annotation_list {views:["Drawing View1"]}` names every annotation (with text, position, box, attachment and, for
+   dimensions, value, prefix, tolerance, precision); `drw_check` lists overlaps, text outside the frame, dangling or
+   unattached annotations, duplicate dimensions and missing Ø.
+2. Dimensions: `drw_dimension_set {name:"RD1@Drawing View1", prefix:"Ø", tolerance:{type:"bilateral", plusMm:0.1,
+   minusMm:0.05}, precision:1, parentheses:true, textAtMm:[x,y]}`. Notes and tables: `drw_annotation_set {name, text,
+   atMm, heightMm}`, `drw_table_set {table, cells:[{row, column, text}], moveRow:[3,1], columnWidthsMm:{"1":40}}`.
+3. Remove things by name: `drw_delete {names:["RD3@Drawing View1", "Section Line A", "Line1@Drawing View2"], dryRun:true}`
+   first, then without `dryRun`.
+4. Views: `drw_view_set {view, centerMm:[x,y]}` (or `boundsMm`), `scale:"1:2"`, `configuration`, `alignment:"none"`.
+   Stack dimensions with `drw_dimensions_arrange {view, side:"above", spacingMm:7}`; baseline sets with
+   `drw_dimension_add {kind:"baseline", view, a:<datum>, targets:[…], direction:"horizontal"}`.
+5. Title block: `drw_title_block` reads the fields and their links; `drw_title_block {values:{DrawnBy:"JS"}}` fills them.
+   Drafting options: `doc_standard {set:{leading_zeros:"remove", dimension_decimals:"2"}}`, or `compareWith` another
+   drawing to see every option that differs.
+6. Many small edits: `drw_batch {steps:[{op:"dimension_set", args:{…}}, …]}` runs them as one undo step (`dryRun:true`
+   previews). `drw_locate {sheetMm:[x,y]}` tells what is at a sheet point (view, annotations, nearest edges with an `at`
+   point); `view_screenshot {regionMm:[x0,y0,x1,y1]}` zooms into a corner of the sheet.
 
 **Stress check.** `sim_static {material:"AISI 1020", fixedFaces:[{at:[0,5,5]}],
 loads:[{kind:"pressure", faces:[{at:[50,10,5]}], valueMpa:0.1}]}` meshes, solves and returns the maximum von Mises

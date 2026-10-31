@@ -1,5 +1,41 @@
 # Changelog
 
+## Unreleased: editing existing drawings (implemented, not yet run against a live SOLIDWORKS)
+From a session spent finishing someone's partly done drawing, where nearly every edit went through `vba_run`. All of
+it is implemented and compile-checked against the interop, with offline unit tests for the pure logic and live tests
+written but not yet run; DESIGN §7.3 lists the status and what is still open.
+- New tools (14, 141 in all):
+  - `drw_annotation_list`, `drw_dimension_set` (prefix/suffix, text above/below, tolerances incl. fits, precision of
+    value and tolerance, parentheses, height, position), `drw_annotation_set` (note text, move, height, angle; tables and
+    any annotation), `drw_delete` (annotations, views, detail circles, section lines, view sketch segments; dry run);
+  - `drw_view_set` (move by outline centre or corner, scale, configuration, alignment, lock; dry run);
+  - `drw_title_block` (fields and their property links; fill properties where the title block links them; re-link or
+    rewrite fields), `drw_hatch` (per component: pattern, angle, scale, material hatch), `drw_table_set` (cells, row and
+    column order, insert column, BOM column → custom property, widths, row and text height, position);
+  - `drw_check` (overlaps, outside the frame, dangling, unattached, duplicate dimensions, missing Ø, view overlaps),
+    `drw_locate` (model ↔ sheet coordinates, what is at a sheet point, nearest edges), `drw_dimensions_arrange`
+    (stack dimensions on one side), `drw_batch` (several edits as one undo step; failure or dry run undoes them);
+  - `doc_standard` (load/save `.sldstd`, named document options, diff of every option against another document);
+  - `feature_hole_edit` (change a Hole Wizard hole in place by kind/size/end names; verified or undone).
+- Extended tools:
+  - `drw_note_add`: `attachTo` (leader notes on a model edge or vertex); the escape `\n` is a line break;
+  - `drw_dimension_add`: kind `chamfer`, and `baseline` / `chain` sets with `targets`; the default text spot stays in the
+    drawing frame, and a dimension reaching outside it is reported;
+  - `drw_view_section`: `throughModelMm` + `orientation`, `excludeComponents` (also in subassemblies), `autoHatch`, `flip`;
+    `drw_view_detail`: `centerModelMm`, `radiusModelMm`, `labelAtMm`; both close the view sketch they used to leave open;
+  - `drw_annotation_add` balloons: `components` and `layout`; `drw_center_marks`: `at` + `kind` (center marks on chosen
+    circles, centerlines on round faces, e.g. a port in a section view);
+  - `view_screenshot`: `regionMm` (zoom into a sheet rectangle);
+  - `asm_mate_add`: `configurations: all`, `side` (outside/inside, flip chosen to match); `asm_mate_list`: `feature`
+    (+`component`): the mates an edit of that feature can break, and each entity's owning feature.
+- Fixes:
+  - `doc_undo` works in drawings (the always-active sheet sketch no longer blocks it) and after `vba_run` on documents the
+    server may edit (the macro is recorded as one undo step and counted as the server's change);
+  - system options SOLIDWORKS changes by itself during a call (opening a document recomputes STL deviation, system
+    double 2) are put back to the user's value; under a coarse/fine STL preset they are SOLIDWORKS-derived and left alone.
+- Not addressed: `computer_open_application` launching a second SOLIDWORKS is the MCP client's computer-use tool, not part
+  of this server (this server never launches a second instance, DESIGN §3.3).
+
 ## 0.1.0 (unreleased)
 - Foundation:
   - STA COM dispatcher with timeouts, BUSY, late completions, early DIALOG_BLOCKING and a cross-process lock;

@@ -1125,119 +1125,122 @@ public sealed partial class DrawingService(SwSession session)
         if (k == "angular" && b is null) throw SwException.InvalidArgument("An angular dimension needs two straight edges ('a' and 'b').");
         (double X, double Y)? text = textAtMm is null ? null : Sheet2(textAtMm, "textAtMm");
         var options = RunOptions.Write(doc) with { DialogRules = [DialogRules.ModifyDimension] };
-        return session.RunAsync("drw_dimension_add", ctx =>
-        {
-            var d = ctx.Doc;
-            var drw = ctx.Drawing();
-            var hit = FindView(ctx, drw, view, "view");
-            var model = ModelOf(hit);
-            var xf = hit.View.DrwModelToSheet();
-            if (xf.Length < 13)
-                throw new SwException(ErrorCodes.NotSupported, $"View '{hit.Name}' gives no model-to-sheet transform, so model references can't be placed in it.");
-            var t = new Xform(xf);
-            double s = SheetScale(xf, hit.View.ScaleDecimal);
-            bool part = model.GetType() == (int)swDocumentTypes_e.swDocPART;
-            var ra = EntityResolver.Resolve(ctx, model, a, "a", EntityKind.Edge, EntityKind.Vertex);
-            var rb = b is null ? null : EntityResolver.Resolve(ctx, model, b, "b", EntityKind.Edge, EntityKind.Vertex);
-            var ga = Seen(ra, t, part, "a");
-            var gb = rb is null ? null : Seen(rb, t, part, "b");
-            if (gb is not null && ga.Pick.DistanceTo(gb.Pick) < PosTol && ga.Kind == gb.Kind)
-                throw SwException.InvalidArgument("'a' and 'b' are drawn at the same place in this view.", "Pick two different edges or vertices.");
-            if (k is "radial" or "diameter" && !(ga.Kind == "circle" && ga.FaceOn))
-                throw SwException.InvalidArgument($"A {k} dimension needs a circular edge seen face-on; {ga.Label} is a {ga.Kind}{(ga.Kind == "circle" ? " seen edge-on" : "")} in '{hit.Name}'.");
-            if (k is "angular" or "chamfer" && !(ga.Kind == "line" && gb!.Kind == "line"))
-                throw SwException.InvalidArgument($"An {k} dimension needs two straight edges as seen in this view.");
-            double? expected = k == "chamfer" ? null : Expected(k, ga, gb, s);
-            if (k == "angular" && expected is null)
-                throw SwException.InvalidArgument("The two edges are parallel in this view, so there is no angle between them.");
-            var outline = Outline(hit);
-            var picks = new List<(double, double)> { (ga.Pick.X * 1000, ga.Pick.Y * 1000) };
-            if (gb is not null) picks.Add((gb.Pick.X * 1000, gb.Pick.Y * 1000));
-            var tp = text ?? DrawingLayout.DimensionText(k == "chamfer" ? "linear" : k, picks, outline);
-            var frame = Frame(SheetOf(drw, hit));
-            if (text is null)
-            {
-                // The default spot is beside the view; near the border it would land outside the frame (seen live): clamp it in.
-                var (cx, cy, moved) = DrawingEdit.Clamp(tp.X, tp.Y, 20, 8, frame);
-                if (moved) { tp = (cx, cy); }
-            }
-            else if (!frame.Contains(tp.X, tp.Y))
-                ctx.Warn($"textAtMm [{Fmt([tp.X, tp.Y])}] is outside the drawing frame [{Fmt(frame.ToArray())}] mm.");
+        return session.RunAsync("drw_dimension_add", ctx => DimensionAdd(ctx, view, a, b, k, text), options, ct);
+    }
 
-            var checks = new List<string>();
-            using var prefs = ctx.SystemPrefs();
-            prefs.Toggle(SystemPrefIds.InputDimValOnCreate, false); // no modal Modify box
-            Activate(drw, hit);
-            int before = Count(hit.View).Dimensions;
-            d.ClearSelection2(true);
-            SelectInView(ctx, d, hit, ra, ga, t, part, append: false, "a", checks);
-            if (rb is not null) SelectInView(ctx, d, hit, rb, gb!, t, part, append: true, "b", checks);
-            var dd = k == "chamfer"
-                ? (object?)drw.AddChamferDim(Units.M(tp.X), Units.M(tp.Y), 0) as IDisplayDimension
-                : d.DrwAddDimension(k, Units.M(tp.X), Units.M(tp.Y));
-            d.ClearSelection2(true);
-            if (dd is null)
-                throw new SwException(ErrorCodes.FeatureFailed,
-                    $"SOLIDWORKS created no {k} dimension on {ra.Label}{(rb is null ? "" : $" and {rb.Label}")} in '{hit.Name}'.",
-                    "Check that the entities can carry this kind of dimension (two parallel lines or two points for a distance, a circle for radial/diameter).");
-            var dim = dd.GetDimension2(0);
-            if (dim is null)
+    /// <summary>One drawing dimension, verified (drw_dimension_add, and each step of a baseline or chain set).</summary>
+    private static DrwDimensionResult DimensionAdd(SwContext ctx, string? view, EntityRef a, EntityRef? b, string k, (double X, double Y)? text)
+    {
+        var d = ctx.Doc;
+        var drw = ctx.Drawing();
+        var hit = FindView(ctx, drw, view, "view");
+        var model = ModelOf(hit);
+        var xf = hit.View.DrwModelToSheet();
+        if (xf.Length < 13)
+            throw new SwException(ErrorCodes.NotSupported, $"View '{hit.Name}' gives no model-to-sheet transform, so model references can't be placed in it.");
+        var t = new Xform(xf);
+        double s = SheetScale(xf, hit.View.ScaleDecimal);
+        bool part = model.GetType() == (int)swDocumentTypes_e.swDocPART;
+        var ra = EntityResolver.Resolve(ctx, model, a, "a", EntityKind.Edge, EntityKind.Vertex);
+        var rb = b is null ? null : EntityResolver.Resolve(ctx, model, b, "b", EntityKind.Edge, EntityKind.Vertex);
+        var ga = Seen(ra, t, part, "a");
+        var gb = rb is null ? null : Seen(rb, t, part, "b");
+        if (gb is not null && ga.Pick.DistanceTo(gb.Pick) < PosTol && ga.Kind == gb.Kind)
+            throw SwException.InvalidArgument("'a' and 'b' are drawn at the same place in this view.", "Pick two different edges or vertices.");
+        if (k is "radial" or "diameter" && !(ga.Kind == "circle" && ga.FaceOn))
+            throw SwException.InvalidArgument($"A {k} dimension needs a circular edge seen face-on; {ga.Label} is a {ga.Kind}{(ga.Kind == "circle" ? " seen edge-on" : "")} in '{hit.Name}'.");
+        if (k is "angular" or "chamfer" && !(ga.Kind == "line" && gb!.Kind == "line"))
+            throw SwException.InvalidArgument($"An {k} dimension needs two straight edges as seen in this view.");
+        double? expected = k == "chamfer" ? null : Expected(k, ga, gb, s);
+        if (k == "angular" && expected is null)
+            throw SwException.InvalidArgument("The two edges are parallel in this view, so there is no angle between them.");
+        var outline = Outline(hit);
+        var picks = new List<(double, double)> { (ga.Pick.X * 1000, ga.Pick.Y * 1000) };
+        if (gb is not null) picks.Add((gb.Pick.X * 1000, gb.Pick.Y * 1000));
+        var tp = text ?? DrawingLayout.DimensionText(k == "chamfer" ? "linear" : k, picks, outline);
+        var frame = Frame(SheetOf(drw, hit));
+        if (text is null)
+        {
+            // The default spot is beside the view; near the border it would land outside the frame (seen live): clamp it in.
+            var (cx, cy, moved) = DrawingEdit.Clamp(tp.X, tp.Y, 20, 8, frame);
+            if (moved) { tp = (cx, cy); }
+        }
+        else if (!frame.Contains(tp.X, tp.Y))
+            ctx.Warn($"textAtMm [{Fmt([tp.X, tp.Y])}] is outside the drawing frame [{Fmt(frame.ToArray())}] mm.");
+
+        var checks = new List<string>();
+        using var prefs = ctx.SystemPrefs();
+        prefs.Toggle(SystemPrefIds.InputDimValOnCreate, false); // no modal Modify box
+        Activate(drw, hit);
+        int before = Count(hit.View).Dimensions;
+        d.ClearSelection2(true);
+        SelectInView(ctx, d, hit, ra, ga, t, part, append: false, "a", checks);
+        if (rb is not null) SelectInView(ctx, d, hit, rb, gb!, t, part, append: true, "b", checks);
+        var dd = k == "chamfer"
+            ? (object?)drw.AddChamferDim(Units.M(tp.X), Units.M(tp.Y), 0) as IDisplayDimension
+            : d.DrwAddDimension(k, Units.M(tp.X), Units.M(tp.Y));
+        d.ClearSelection2(true);
+        if (dd is null)
+            throw new SwException(ErrorCodes.FeatureFailed,
+                $"SOLIDWORKS created no {k} dimension on {ra.Label}{(rb is null ? "" : $" and {rb.Label}")} in '{hit.Name}'.",
+                "Check that the entities can carry this kind of dimension (two parallel lines or two points for a distance, a circle for radial/diameter).");
+        var dim = dd.GetDimension2(0);
+        if (dim is null)
+        {
+            DeleteDimension(d, dd);
+            throw new SwException(ErrorCodes.FeatureFailed, "The new display dimension has no dimension value; it was removed.");
+        }
+        bool angular = k == "angular" || dim.GetType() == (int)swDimensionParamType_e.swDimensionParamTypeDoubleAngular;
+        double v = dim.SystemValue;
+        if (expected is double e)
+        {
+            bool ok = angular
+                ? Math.Abs(v - e) < 1e-5 || Math.Abs(v - (Math.PI - e)) < 1e-5
+                : Math.Abs(v - e) <= Math.Max(1e-6, 1e-6 * Math.Abs(e));
+            if (!ok)
             {
-                DeleteDimension(d, dd);
-                throw new SwException(ErrorCodes.FeatureFailed, "The new display dimension has no dimension value; it was removed.");
+                bool gone = DeleteDimension(d, dd);
+                throw new SwException(ErrorCodes.VerifyFailed,
+                    $"SOLIDWORKS dimensioned {Show(v, angular)} instead of the {k} {Show(e, angular)} of {ra.Label}{(rb is null ? "" : $" and {rb.Label}")}; " +
+                    (gone ? "the dimension was removed." : "the dimension could not be removed."),
+                    "Pass textAtMm next to the quantity you want (beside a length, inside an angle), or use kind horizontal / vertical.");
             }
-            bool angular = k == "angular" || dim.GetType() == (int)swDimensionParamType_e.swDimensionParamTypeDoubleAngular;
-            double v = dim.SystemValue;
-            if (expected is double e)
+            checks.Add($"value {Show(v, angular)} matches the geometry");
+        }
+        if (k == "chamfer")
+        {
+            if (dd.GetType() != (int)swDimensionType_e.swChamferDimension)
             {
-                bool ok = angular
-                    ? Math.Abs(v - e) < 1e-5 || Math.Abs(v - (Math.PI - e)) < 1e-5
-                    : Math.Abs(v - e) <= Math.Max(1e-6, 1e-6 * Math.Abs(e));
-                if (!ok)
-                {
-                    bool gone = DeleteDimension(d, dd);
-                    throw new SwException(ErrorCodes.VerifyFailed,
-                        $"SOLIDWORKS dimensioned {Show(v, angular)} instead of the {k} {Show(e, angular)} of {ra.Label}{(rb is null ? "" : $" and {rb.Label}")}; " +
-                        (gone ? "the dimension was removed." : "the dimension could not be removed."),
-                        "Pass textAtMm next to the quantity you want (beside a length, inside an angle), or use kind horizontal / vertical.");
-                }
-                checks.Add($"value {Show(v, angular)} matches the geometry");
+                bool gone = DeleteDimension(d, dd);
+                throw new SwException(ErrorCodes.VerifyFailed, $"SOLIDWORKS made a {DimKind(dd.GetType())} dimension, not a chamfer dimension; it was {(gone ? "" : "not ")}removed.",
+                    "'a' must be the chamfer's edge and 'b' an edge it meets (the lead-in edge), both seen as lines in this view.");
             }
-            if (k == "chamfer")
-            {
-                if (dd.GetType() != (int)swDimensionType_e.swChamferDimension)
-                {
-                    bool gone = DeleteDimension(d, dd);
-                    throw new SwException(ErrorCodes.VerifyFailed, $"SOLIDWORKS made a {DimKind(dd.GetType())} dimension, not a chamfer dimension; it was {(gone ? "" : "not ")}removed.",
-                        "'a' must be the chamfer's edge and 'b' an edge it meets (the lead-in edge), both seen as lines in this view.");
-                }
-                checks.Add("a chamfer dimension");
-            }
-            int after = Count(hit.View).Dimensions;
-            if (after == before + 1) checks.Add($"'{hit.Name}' has {after} dimension(s)");
-            else ctx.Warn($"'{hit.Name}' went from {before} to {after} dimension(s).");
-            if (dd.DrwAnnotation() is IAnnotation dan && (object?)dan.GetDisplayData() is IDisplayData ddata && DisplayBox(ddata) is SheetRect db)
-            {
-                if (db.Inside(frame, 0.5)) checks.Add("inside the drawing frame");
-                else ctx.Warn($"The dimension's box [{Fmt(db.ToArray())}] mm reaches outside the drawing frame [{Fmt(frame.ToArray())}] mm; move it with drw_dimension_set textAtMm.");
-            }
-            var resolved = new List<ResolvedInfo> { ra.Info("a") };
-            if (rb is not null) resolved.Add(rb.Info("b"));
-            return new DrwDimensionResult
-            {
-                Doc = ctx.Title(d),
-                View = hit.Name,
-                Kind = k,
-                Dimension = FeatureVerifier.ShortName(dim.FullName),
-                Value = angular ? Units.Deg(v) : Units.Mm(v),
-                Unit = angular ? "deg" : "mm",
-                Expected = expected is double ex ? (angular ? Units.Deg(ex) : Units.Mm(ex)) : null,
-                Reference = dim.DrivenState == (int)swDimensionDrivenState_e.swDimensionDriven ? true : null,
-                TextAtMm = [Math.Round(tp.X, 3), Math.Round(tp.Y, 3)],
-                Checks = checks,
-                Resolved = resolved,
-            };
-        }, options, ct);
+            checks.Add("a chamfer dimension");
+        }
+        int after = Count(hit.View).Dimensions;
+        if (after == before + 1) checks.Add($"'{hit.Name}' has {after} dimension(s)");
+        else ctx.Warn($"'{hit.Name}' went from {before} to {after} dimension(s).");
+        if (dd.DrwAnnotation() is IAnnotation dan && (object?)dan.GetDisplayData() is IDisplayData ddata && DisplayBox(ddata) is SheetRect db)
+        {
+            if (db.Inside(frame, 0.5)) checks.Add("inside the drawing frame");
+            else ctx.Warn($"The dimension's box [{Fmt(db.ToArray())}] mm reaches outside the drawing frame [{Fmt(frame.ToArray())}] mm; move it with drw_dimension_set textAtMm.");
+        }
+        var resolved = new List<ResolvedInfo> { ra.Info("a") };
+        if (rb is not null) resolved.Add(rb.Info("b"));
+        return new DrwDimensionResult
+        {
+            Doc = ctx.Title(d),
+            View = hit.Name,
+            Kind = k,
+            Dimension = FeatureVerifier.ShortName(dim.FullName),
+            Value = angular ? Units.Deg(v) : Units.Mm(v),
+            Unit = angular ? "deg" : "mm",
+            Expected = expected is double ex ? (angular ? Units.Deg(ex) : Units.Mm(ex)) : null,
+            Reference = dim.DrivenState == (int)swDimensionDrivenState_e.swDimensionDriven ? true : null,
+            TextAtMm = [Math.Round(tp.X, 3), Math.Round(tp.Y, 3)],
+            Checks = checks,
+            Resolved = resolved,
+        };
     }
 
     /// <summary>How a resolved model entity appears on the sheet.</summary>

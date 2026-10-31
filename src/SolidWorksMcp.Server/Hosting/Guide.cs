@@ -32,6 +32,7 @@ public static class Guide
         new("workflow_plate", "a plate with holes and rounded corners, step by step"),
         new("workflow_enclosure", "an open box with 2 mm walls, rounded corners and a cable hole"),
         new("editing", "changing an existing part, a user's document or a STEP file"),
+        new("drawing_editing", "finishing someone's drawing: list, change, move and delete annotations and views"),
         new("recovery", "every error code and what to do next"),
         new("tools", "every tool of this server with its parameters"),
     ];
@@ -41,7 +42,7 @@ public static class Guide
         ["convention"] = "conventions", ["units"] = "conventions",
         ["entity"] = "entityref", ["entity_ref"] = "entityref", ["entityrefs"] = "entityref", ["references"] = "entityref", ["refs"] = "entityref",
         ["plate"] = "workflow_plate", ["enclosure"] = "workflow_enclosure", ["box"] = "workflow_enclosure",
-        ["edit"] = "editing", ["errors"] = "recovery", ["error"] = "recovery", ["tool"] = "tools", ["index"] = "",
+        ["edit"] = "editing", ["drawing"] = "drawing_editing", ["drawings"] = "drawing_editing", ["errors"] = "recovery", ["error"] = "recovery", ["tool"] = "tools", ["index"] = "",
     };
 
     /// <summary>The topic text, or the index for null/empty. Unknown topics are INVALID_ARGUMENT.</summary>
@@ -58,6 +59,7 @@ public static class Guide
             "workflow_plate" => WorkflowPlate,
             "workflow_enclosure" => WorkflowEnclosure,
             "editing" => Editing,
+            "drawing_editing" => DrawingEditing,
             "recovery" => Recovery,
             "tools" => ToolsText(),
             _ => throw SwException.InvalidArgument($"Unknown help topic '{topic}'.",
@@ -211,6 +213,40 @@ public static class Guide
         15. model_export {path:"enclosure.step"}
 
         Check: model_info reports about 48177 mm3 (384000 - 1236.1 outer rounds - 335008 pocket + 521.9 inner rounds - 100.5 hole).
+        """;
+
+    public const string DrawingEditing = """
+        # Finishing an existing drawing
+
+        Everything goes by name; nothing needs VBA. Work on the current sheet (drw_info lists sheets and views).
+        1. Read it: drw_annotation_list {views:["Drawing View1"]} gives every annotation's name, type, text (shown and
+           raw, e.g. $PRPSHEET links), position, box, leader ends, what it is attached to (model mm) and, for dimensions,
+           value, prefix, tolerance, precision and parentheses. drw_check {} lists overlapping text, text outside the frame,
+           dangling or unattached annotations, duplicate dimensions and diameters shown without Ø.
+        2. Dimensions: drw_dimension_set {name:"RD1@Drawing View1", prefix:"Ø", tolerance:{type:"bilateral", plusMm:0.1,
+           minusMm:0.05}, precision:1, tolerancePrecision:2, parentheses:true, textAtMm:[120,80]}. Every setting is read back
+           and all are put back if one fails. A tolerance on a model dimension changes the model too.
+        3. Notes and tables: drw_annotation_set {name:"DetailItem12", text:"NOTES:\n1. DEBURR", heightMm:3.5, atMm:[30,40]};
+           drw_table_set {table:"Bill of Materials1", cells:[{row:1, column:2, text:"BRACKET"}], moveRow:[3,1],
+           columnWidthsMm:{"2":45}, columnProperty:["3","Material"]}. New ones: drw_note_add {text, atMm, view,
+           attachTo:{type:"edge", at:[0,-30,20]}} for a leader note; drw_dimension_add {kind:"chamfer", view, a, b}.
+        4. Delete: drw_delete {names:["RD3@Drawing View1", "Section Line A", "Detail Circle B", "Line1@Drawing View2"],
+           dryRun:true} shows what the names are; then the same without dryRun. doc_undo takes it back.
+        5. Views: drw_view_set {view:"Drawing View2", centerMm:[300,150]} moves by the outline (or boundsMm for its corner);
+           scale:"1:2", configuration:"Short", alignment:"none" (break it). dryRun:true reports the outline and overlaps.
+           Sections and details from model points: drw_view_section {parent, throughModelMm:[0,0,10],
+           orientation:"vertical", excludeComponents:["bolt-1"], autoHatch:true}; drw_view_detail {parent,
+           centerModelMm:[40,0,20], radiusModelMm:8, labelAtMm:[200,120]}. Hatches: drw_hatch {view, pattern:"ANSI31"}.
+        6. Layout: drw_dimensions_arrange {view, side:"above", spacingMm:7} stacks dimensions; drw_dimension_add
+           {kind:"baseline", view, a:{type:"edge", at:[-50,0,20]}, targets:[…], direction:"horizontal", side:"above"}.
+           drw_locate {sheetMm:[150,90]} tells what is at a sheet point (and the nearest edges with an at point);
+           view_screenshot {regionMm:[250,10,420,80]} zooms into a corner.
+        7. Title block: drw_title_block {} reads its fields and links; drw_title_block {values:{DrawnBy:"JS"}} writes each
+           property where the title block links it. Options: doc_standard {set:{leading_zeros:"remove",
+           dimension_decimals:"2"}}, or doc_standard {compareWith:"D3"} to see every option that differs.
+        8. Many small edits: drw_batch {steps:[{op:"dimension_set", args:{name:"RD1@Drawing View1", prefix:"Ø"}},
+           {op:"delete", args:{names:["RD4@Drawing View1"]}}]} runs them as one undo step; a failing step undoes all, and
+           dryRun:true runs, reports and undoes.
         """;
 
     public const string Editing = """
